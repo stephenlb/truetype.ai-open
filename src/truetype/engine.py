@@ -6,11 +6,13 @@ Design notes
   Base models are pure next-token predictors: no chat template, no thinking
   channel, no multi-token preamble to fight. The letter that follows our prompt
   *is* the answer, and its logit is directly comparable across questions.
-* ``max_new_tokens=1`` is enforced structurally, not by generation limits: we run
-  a single ``forward`` and read the last position of the logits. Nothing is
-  sampled, so there is no way for the model to run away and emit prose.
-* All 26 uppercase letters (and their space-prefixed variants) are single tokens
-  in this vocabulary, so the letter distribution is a clean 26-way readout.
+* ``MAX_NEW_TOKENS = 1`` is enforced *structurally*, not by a generation limit: we
+  run a single ``forward`` and read the logits at the last position. Nothing is
+  sampled and there is no decode loop, so the model cannot emit a second token
+  even in principle.
+* The readout is restricted to the 26 uppercase letters A-Z, all drawn from one
+  token variant so their logits are comparable, then softmaxed at a low
+  temperature over just the letters a given question declares legal.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -26,12 +29,24 @@ from .letters import (
     LetterReadout,
     SoftmaxDistribution,
     batch_letter_logits,
+    batch_letter_mass,
     distribution_from_letter_logits,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "google/gemma-4-12B"
+
+# The answer is exactly one token. This is a property of how we call the model (a
+# single forward, logits at one position) rather than a cap we ask it to respect.
+MAX_NEW_TOKENS = 1
+
+# Softmax temperature for turning letter logits into a distribution. Moderately
+# low: it sharpens the readout toward the model's preferred letter and keeps the
+# reported probabilities/scores close to discrete levels. It cannot change the
+# argmax for noul/choice (a monotonic transform), but it does tighten `score`
+# expected values and make `confidence` meaningful.
+DEFAULT_TEMPERATURE = 0.7
 
 
 @dataclass
@@ -40,10 +55,18 @@ class EngineConfig:
     device: str = "auto"
     dtype: str = "auto"
     top_k: int = 5
-    temperature: float = 1.0
+    temperature: float = DEFAULT_TEMPERATURE
     max_batch_size: int = 16
     trust_remote_code: bool = False
     letters_with_leading_space: bool = True
+    # Reuse the KV cache of the static few-shot prefix across calls. The prefix is
+    # 70-85% of a prompt and identical for every call on the same question, so
+    # caching it removes most of the prefill work (~2.9x faster per decision).
+    prefix_cache: bool = True
+    # Each cached prefix costs ~127MB of KV at 369 tokens. This must be >= the
+    # number of distinct questions in a request or the LRU thrashes and every call
+    # re-pays the full prefill.
+    max_cached_prefixes: int = 8
     extra: dict = field(default_factory=dict)
 
 
@@ -53,11 +76,16 @@ class GemmaLetterEngine:
     def __init__(self, config: EngineConfig | None = None) -> None:
         self.config = config or EngineConfig()
         self._lock = threading.Lock()
+        self._cache_lock = threading.Lock()
         self._model = None
         self._tokenizer = None
         self._letter_token_ids: dict[str, int] = {}
         self._pad_token_id: int | None = None
         self.load_seconds: float | None = None
+        # prefix string -> (KV cache, prefix token ids)
+        self._prefix_caches: "OrderedDict[str, tuple[object, object]]" = OrderedDict()
+        self.prefix_cache_hits = 0
+        self.prefix_cache_misses = 0
 
     # ------------------------------------------------------------------ loading
 
@@ -123,28 +151,48 @@ class GemmaLetterEngine:
             )
 
     def _build_letter_token_ids(self) -> dict[str, int]:
-        """Map each A-Z to the single token id used for the answer position.
+        """Map each A-Z to the single token id read at the answer position.
 
-        Base models are trained on natural text where an answer letter follows a
-        space, so ``" A"`` is the canonical continuation. We verify single-token
-        status at load time and fail loudly rather than silently producing apples
-        -to-oranges logits.
+        The prompt ends at ``Answer:`` with no trailing space, so the natural
+        continuation is the space-prefixed letter (``"▁Y"``), matching how the
+        few-shot examples tokenize. We therefore prefer the ``" A"`` forms.
+
+        The whole 26-letter set must come from *one* variant. Falling back
+        per-letter could mix ``"▁Q"`` with a bare ``"Q"``, and logits for tokens of
+        different shapes are not comparable — that would silently corrupt the
+        argmax. So we require all 26 to be single tokens in the same variant and
+        fail loudly otherwise.
         """
         assert self._tokenizer is not None
-        mapping: dict[str, int] = {}
-        for letter in LETTERS:
-            candidates = [f" {letter}", letter] if self.config.letters_with_leading_space else [letter]
-            token_id = None
-            for candidate in candidates:
-                ids = self._tokenizer.encode(candidate, add_special_tokens=False)
-                if len(ids) == 1:
-                    token_id = ids[0]
+
+        variants: list[tuple[str, dict[str, int]]] = []
+        candidate_forms = [("space-prefixed", " {}"), ("bare", "{}")]
+        if not self.config.letters_with_leading_space:
+            candidate_forms.reverse()
+
+        for name, template in candidate_forms:
+            mapping: dict[str, int] = {}
+            for letter in LETTERS:
+                ids = self._tokenizer.encode(template.format(letter), add_special_tokens=False)
+                if len(ids) != 1:
+                    mapping = {}
                     break
-            if token_id is None:
-                raise RuntimeError(
-                    f"letter {letter!r} is not a single token in {self.config.model_id}"
-                )
-            mapping[letter] = token_id
+                mapping[letter] = ids[0]
+            if len(mapping) == len(LETTERS):
+                variants.append((name, mapping))
+
+        if not variants:
+            raise RuntimeError(
+                f"no single-token A-Z variant found in {self.config.model_id}; "
+                "the letter readout cannot be trusted"
+            )
+
+        name, mapping = variants[0]
+        if len(set(mapping.values())) != len(LETTERS):
+            raise RuntimeError(f"{name} A-Z token ids are not distinct in {self.config.model_id}")
+
+        self.letter_variant = name
+        logger.info("letter readout uses %s A-Z tokens", name)
         return mapping
 
     # ----------------------------------------------------------------- inference
@@ -193,21 +241,143 @@ class GemmaLetterEngine:
         with torch.inference_mode():
             outputs = self._model(
                 **encoded,
-                logits_to_keep=1,
+                logits_to_keep=MAX_NEW_TOKENS,
                 use_cache=False,
             )
 
         next_token_logits = outputs.logits[:, -1, :].float()
         letter_logits = batch_letter_logits(next_token_logits, self._letter_token_ids)
+        masses = batch_letter_mass(next_token_logits, self._letter_token_ids)
         return [
             LetterReadout(
                 logits=row,
                 top=distribution_from_letter_logits(row, top_k=top_k, temperature=temperature),
+                letter_mass=mass,
             )
-            for row in letter_logits
+            for row, mass in zip(letter_logits, masses)
         ]
 
     def score_one(
         self, prompt: str, *, top_k: int | None = None, temperature: float | None = None
     ) -> LetterReadout:
         return self.score_batch([prompt], top_k=top_k, temperature=temperature)[0]
+
+    # ------------------------------------------------------------ prefix caching
+
+    def score_with_prefix(
+        self,
+        prefix: str,
+        suffixes: Sequence[str],
+        *,
+        top_k: int | None = None,
+        temperature: float | None = None,
+    ) -> list[LetterReadout]:
+        """Score ``prefix + suffix`` for each suffix, reusing the prefix's KV cache.
+
+        The full prompt is always tokenized as one string and the cached prefix ids
+        are checked against its head, so the tokens fed to the model are exactly the
+        tokens the uncached path would use. If a prompt does not start with the
+        cached prefix tokens (a BPE merge across the boundary, say), that prompt
+        silently falls back to a full forward pass.
+        """
+        self.load()
+        if not suffixes:
+            return []
+
+        k = self.config.top_k if top_k is None else top_k
+        temp = self.config.temperature if temperature is None else temperature
+
+        if not self.config.prefix_cache or not prefix:
+            return self.score_batch(
+                [prefix + s for s in suffixes], top_k=top_k, temperature=temperature
+            )
+
+        results: list[LetterReadout] = []
+        for suffix in suffixes:
+            scored = self._letter_logits_cached(prefix, suffix)
+            if scored is None:
+                results.append(self.score_batch([prefix + suffix], top_k=k, temperature=temp)[0])
+            else:
+                logits, mass = scored
+                results.append(
+                    LetterReadout(
+                        logits=logits,
+                        top=distribution_from_letter_logits(logits, top_k=k, temperature=temp),
+                        letter_mass=mass,
+                    )
+                )
+        return results
+
+    def _letter_logits_cached(
+        self, prefix: str, suffix: str
+    ) -> tuple[dict[str, float], float] | None:
+        """Letter logits for ``prefix + suffix``, reusing or populating the prefix cache.
+
+        A miss costs exactly one forward pass over the whole prompt — the same work
+        the uncached path does — and the prefix half of that pass's KV is kept for
+        next time. A hit only prefills the tail.
+        """
+        import torch
+
+        with self._cache_lock:
+            device = self._model.device
+            full_ids = self._tokenizer(
+                prefix + suffix, return_tensors="pt", add_special_tokens=True
+            ).input_ids.to(device)
+            total = full_ids.shape[1]
+
+            entry = self._prefix_caches.get(prefix)
+            if entry is not None:
+                cache, prefix_ids = entry
+                prefix_len = prefix_ids.shape[1]
+                # Only safe if this prompt really begins with the cached tokens.
+                if total <= prefix_len or not torch.equal(full_ids[:, :prefix_len], prefix_ids):
+                    return None
+                self._prefix_caches.move_to_end(prefix)
+                self.prefix_cache_hits += 1
+
+                tail = full_ids[:, prefix_len:]
+                with torch.inference_mode():
+                    out = self._model(
+                        input_ids=tail,
+                        attention_mask=torch.ones((1, total), dtype=torch.long, device=device),
+                        past_key_values=cache,
+                        cache_position=torch.arange(prefix_len, total, device=device),
+                        logits_to_keep=MAX_NEW_TOKENS,
+                        use_cache=True,
+                    )
+                next_token_logits = out.logits[:, -1, :].float()
+                # Drop the tail so the cache holds only the prefix again.
+                cache.crop(-(total - prefix_len))
+                return (
+                    batch_letter_logits(next_token_logits, self._letter_token_ids)[0],
+                    batch_letter_mass(next_token_logits, self._letter_token_ids)[0],
+                )
+
+            # Miss: one full forward, then keep the prefix slice of its KV cache.
+            self.prefix_cache_misses += 1
+            prefix_ids = self._tokenizer(
+                prefix, return_tensors="pt", add_special_tokens=True
+            ).input_ids.to(device)
+            prefix_len = prefix_ids.shape[1]
+
+            with torch.inference_mode():
+                out = self._model(
+                    input_ids=full_ids,
+                    attention_mask=torch.ones((1, total), dtype=torch.long, device=device),
+                    logits_to_keep=MAX_NEW_TOKENS,
+                    use_cache=True,
+                )
+            next_token_logits = out.logits[:, -1, :].float()
+
+            if total > prefix_len and torch.equal(full_ids[:, :prefix_len], prefix_ids):
+                cache = out.past_key_values
+                cache.crop(-(total - prefix_len))
+                self._prefix_caches[prefix] = (cache, prefix_ids)
+                while len(self._prefix_caches) > max(1, self.config.max_cached_prefixes):
+                    self._prefix_caches.popitem(last=False)
+
+            return (
+                batch_letter_logits(next_token_logits, self._letter_token_ids)[0],
+                batch_letter_mass(next_token_logits, self._letter_token_ids)[0],
+            )

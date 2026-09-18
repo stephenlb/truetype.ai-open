@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .engine import EngineConfig, GemmaLetterEngine
+from .engine import DEFAULT_TEMPERATURE, EngineConfig, GemmaLetterEngine
 from .questions import Question, QuestionAnswer, build_question, score_question
-from .render import render_batch
+from .render import render_batch, render_example_prefix, render_target_block
 
 SUPPORTED_MODELS = {
     "gemma-4-12b": "google/gemma-4-12B",
@@ -37,7 +37,7 @@ class TypeSafeReplica:
         state: str | dict | list,
         questions: dict[str, dict],
         model: str | None = None,
-        temperature: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
         include_debug: bool = False,
     ) -> BatchResult:
         if not questions:
@@ -49,9 +49,24 @@ class TypeSafeReplica:
         ]
 
         rendered = render_batch(parsed, state_text)
-        distributions = self.engine.score_batch(
-            [item.text for item in rendered], temperature=temperature
-        )
+        if self.engine.config.prefix_cache:
+            # Each question has its own static few-shot prefix, so score them one at
+            # a time against their own cached prefix. Sequential cached calls beat a
+            # single uncached batch: the prefill saved per question is far larger
+            # than anything batching buys on this hardware.
+            distributions = []
+            for question in parsed:
+                distributions.extend(
+                    self.engine.score_with_prefix(
+                        render_example_prefix(question),
+                        [render_target_block(question, state_text)],
+                        temperature=temperature,
+                    )
+                )
+        else:
+            distributions = self.engine.score_batch(
+                [item.text for item in rendered], temperature=temperature
+            )
 
         answers: dict[str, dict] = {}
         debug: dict[str, dict] = {}

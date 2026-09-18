@@ -29,10 +29,16 @@ class LetterReadout:
 
     ``logits`` keeps every letter so a question with more options than ``top_k`` is
     never silently truncated. ``top`` is the reported top-k softmax distribution.
+    ``letter_mass`` is how much of the model's *full-vocabulary* probability landed
+    on the 26 letters we scored: a sanity check that the prompt really does put the
+    model in a "next token is a letter" state. If it collapses toward zero the
+    readout is measuring noise in the tail of the distribution, even though an
+    argmax over it may still look plausible.
     """
 
     logits: dict[str, float]
     top: "SoftmaxDistribution"
+    letter_mass: float | None = None
 
     @property
     def top_letter(self) -> str:
@@ -124,3 +130,23 @@ def batch_letter_logits(
         {letter: float(value) for letter, value in zip(letter_token_ids, row)}
         for row in gathered
     ]
+
+
+def batch_letter_mass(
+    next_token_logits,  # torch.Tensor [batch, vocab]
+    letter_token_ids: dict[str, int],
+) -> list[float]:
+    """Fraction of full-vocabulary probability sitting on the A-Z tokens, per row.
+
+    Computed with a log-sum-exp over the vocabulary so it is numerically safe and
+    costs one reduction rather than a full softmax materialisation.
+    """
+    import torch
+
+    if next_token_logits.dim() != 2:
+        raise LetterLogitError("expected next-token logits of shape [batch, vocab]")
+
+    ids = list(letter_token_ids.values())
+    total = torch.logsumexp(next_token_logits, dim=-1)
+    letters = torch.logsumexp(next_token_logits[:, ids], dim=-1)
+    return [float(value) for value in torch.exp(letters - total)]

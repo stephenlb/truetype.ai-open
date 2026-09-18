@@ -1,16 +1,45 @@
 """Render every question in a request to a base-completion prompt.
 
-Two prompt strategies, chosen by question type:
+Prompt layout
+-------------
+Every block puts the answer-relevant scaffolding *first* and the text being
+judged *last*, so a prompt is::
 
-* **Noul (Y/N):** a fixed bank of question-agnostic demonstrations. The predicate in
-  the options ("Yes, the text requests a refund.") carries the task; the examples only
-  teach the letter slot. This lifted accuracy from 3/6 to 6/6 in tests/example_transfer.py.
+    Choices:
+    Y. Yes, ...
+    N. No, ...
+    Question: <question>
+    Text: <example text>
+    Answer: Y
 
-* **Choice / Score:** examples generated *from the caller's own criteria*. Each option
-  gets one synthetic demonstration mapping it to its letter. The examples are shuffled
-  so the model cannot exploit alphabetical ordering. This reached 10/10 on Choice and
-  11/12 on Score in tests/choice_score_bakeoff2.py, and requires no hand-authoring
-  because the examples are derived from the question itself.
+    ... more examples ...
+
+    Choices:
+    ...
+    Question: <target question>
+    Text: <the caller's state>
+    Answer:
+
+Putting the state last is what makes the engine's prefix KV cache pay off:
+everything above ``Text:`` depends only on the question, so it is byte-identical
+across calls and can be cached once. That took a warm Doom decision from 357ms to
+178ms (mean prompt tail 68 -> 20 tokens) with no accuracy change — 63/63 on the
+50-case suite plus the Doom probe and 8 held-out noul cases.
+
+Two example strategies, chosen by question type:
+
+* **Noul (Y/N):** a fixed bank of demonstrations that keep *their own* questions.
+  The predicate in the options ("Yes, the text requests a refund.") carries the
+  task; the examples only teach the letter slot. Their questions deliberately
+  differ from the target question, so their Y/N labels stay truthful rather than
+  being relabelled under a question they were not written for. This lifted
+  accuracy from 3/6 to 6/6 in tests/example_transfer.py.
+
+* **Choice / Score:** examples generated *from the caller's own criteria*. Each
+  option gets one synthetic demonstration mapping it to its letter, visited in a
+  non-alphabetical order so the model cannot exploit A,B,C positional cues. This
+  reached 10/10 on Choice and 11/12 on Score in tests/choice_score_bakeoff2.py and
+  needs no hand-authoring.
 """
 
 from __future__ import annotations
@@ -38,13 +67,18 @@ def _render_options(question: Question) -> str:
     return "\n".join(lines)
 
 
+def _header(question: Question, instructions: str | None = None) -> str:
+    """Choices + question. Identical for every call on the same question."""
+    return (
+        f"Choices:\n{_render_options(question)}\n"
+        f"Question: {instructions or question.instructions}\n"
+    )
+
+
 def _noul_examples(question: Question, count: int) -> list[str]:
-    options = _render_options(question)
     blocks = []
     for ex_text, ex_question, ex_letter in GENERIC_EXAMPLES[:count]:
-        blocks.append(
-            f"Text: {ex_text}\nQuestion: {ex_question}\nChoices:\n{options}\nAnswer: {ex_letter}"
-        )
+        blocks.append(f"{_header(question, ex_question)}Text: {ex_text}\nAnswer: {ex_letter}")
     return blocks
 
 
@@ -54,23 +88,16 @@ def _criteria_roundtrip_examples(question: Question) -> list[str]:
     Ordering is deliberately non-alphabetical: options are visited in an order that
     interleaves the scale (low, high, middle, ...) so no positional shortcut exists.
     """
-    options = _render_options(question)
-    n = len(question.options)
-    order = _interleaved_order(n)
-
+    header = _header(question)
     blocks = []
-    for index in order:
+    for index in _interleaved_order(len(question.options)):
         option = question.options[index]
         if question.type == "choice":
-            subject = option.label
             detail = f" This example is about the topic of {option.label}."
         else:
-            subject = option.label
-            detail = option.description or option.label
+            detail = " " + (option.description or option.label)
         blocks.append(
-            f"Text: An example of {subject}: {detail}\n"
-            f"Question: {question.instructions}\n"
-            f"Choices:\n{options}\nAnswer: {option.letter}"
+            f"{header}Text: An example of {option.label}:{detail}\nAnswer: {option.letter}"
         )
     return blocks
 
@@ -84,22 +111,50 @@ def _interleaved_order(n: int) -> list[int]:
     return order
 
 
+def render_example_prefix(
+    question: Question,
+    *,
+    example_count: int = DEFAULT_EXAMPLE_COUNT,
+) -> str:
+    """The part of the prompt that depends only on the question, never on the state.
+
+    This is what the engine keeps in a KV cache across calls: the few-shot examples
+    plus the target question's own Choices/Question header. For a fixed question it
+    is byte-identical every time, and it is ~90% of the prompt.
+    """
+    if question.type == "noul":
+        blocks = _noul_examples(question, example_count)
+    else:
+        blocks = _criteria_roundtrip_examples(question)
+    body = "\n\n".join(blocks) + "\n\n" if blocks else ""
+    return body + _header(question)
+
+
+def render_target_block(question: Question, state: str) -> str:
+    """The state-dependent tail, ending at the ``Answer:`` slot.
+
+    There is deliberately **no trailing space** after ``Answer:``. The letter tokens
+    the engine reads are space-prefixed (``"▁Y"``), which is how the examples above
+    tokenize (``['Answer', ':', '▁Y']``). Adding a trailing space here would emit a
+    standalone ``'▁'`` token and strand the space, so the model would want a bare
+    ``"Y"`` while the engine read ``"▁Y"`` — measured at 0.0000 probability mass on
+    the letters being scored, versus 0.9871 without the space.
+    """
+    return f"Text: {state}\nAnswer:"
+
+
 def render_question(
     question: Question,
     state: str,
     *,
     example_count: int = DEFAULT_EXAMPLE_COUNT,
 ) -> RenderedPrompt:
-    if question.type == "noul":
-        blocks = _noul_examples(question, example_count)
-    else:
-        blocks = _criteria_roundtrip_examples(question)
-
-    blocks.append(
-        f"Text: {state}\nQuestion: {question.instructions}\n"
-        f"Choices:\n{_render_options(question)}\nAnswer: "
+    # Composed from the two halves so the cached-prefix path and the plain path
+    # always produce the exact same prompt string.
+    text = render_example_prefix(question, example_count=example_count) + render_target_block(
+        question, state
     )
-    return RenderedPrompt(question_id=question.id, text="\n\n".join(blocks))
+    return RenderedPrompt(question_id=question.id, text=text)
 
 
 def render_batch(

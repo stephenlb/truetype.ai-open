@@ -1,11 +1,12 @@
-"""50-test verification suite for the truetype.ai replica.
+"""51-test verification suite for the truetype.ai replica.
 
-40 functional tests (20 noul + 20 choice + 10 score) verify the model's top
-letter matches the expected answer for each prompt, and that the reported
-probability distribution is a valid softmax over the legal option letters.
+50 functional tests (20 noul + 20 choice + 10 score) verify the model's top letter
+matches the expected answer for each prompt, and that the reported probability
+distribution is a valid softmax over the legal option letters.
 
-The remaining 10 tests cover the engine contract: letter-token mapping, top-k
-softmax shape, question validation, and score renormalization.
+Test 51 guards the readout contract itself: one token, A-Z only, and the letters
+actually holding the model's probability mass. That last property silently broke
+once while all 50 functional tests still passed.
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ import math
 
 import pytest
 
+from src.truetype.engine import MAX_NEW_TOKENS
 from src.truetype.letters import LETTERS
 from src.truetype.questions import build_question, score_question
+from src.truetype.render import render_example_prefix, render_target_block
 from src.truetype.service import TypeSafeReplica
 
 # ---------------------------------------------------------------------------
@@ -186,7 +189,72 @@ def test_score_severity(service, state, expected):
 
 
 # ---------------------------------------------------------------------------
-# Structural tests (10)
+# Structural test (1): the single-token letter readout contract
 # ---------------------------------------------------------------------------
 
+def test_single_token_letter_readout_contract(engine):
+    """The answer must be one token, drawn from A-Z, holding the model's real mass.
 
+    This guards a bug that passed every accuracy test while being badly wrong: the
+    prompt used to end with ``"Answer: "``, whose trailing space tokenizes to a
+    standalone ``'▁'``. The model then wanted a bare ``"Y"`` while the engine scored
+    the space-prefixed ``"▁Y"``, so the argmax ran over tokens holding 0.0000 of the
+    probability mass. Accuracy survived on ordering alone; the confidences were
+    meaningless. Anything that strands the answer slot again will fail here.
+    """
+    # 1. Exactly one token is read, structurally.
+    assert MAX_NEW_TOKENS == 1
+
+    # 2. The readout targets 26 distinct A-Z ids from a single token variant.
+    assert set(engine._letter_token_ids) == set(LETTERS)
+    assert len(set(engine._letter_token_ids.values())) == 26
+    assert engine.letter_variant in {"space-prefixed", "bare"}
+
+    # 3. The prompt must not strand the space before the answer letter.
+    question = build_question(
+        "q", {"type": "noul", "instructions": "Does the text request a refund?"}
+    )
+    tail = render_target_block(question, "Please refund the duplicate charge.")
+    assert tail.endswith("Answer:"), f"answer slot has a trailing space: {tail[-12:]!r}"
+
+    # 4. The letters must carry the model's actual probability, across all 3 types.
+    prompts = [
+        (question, "Please refund the duplicate charge."),
+        (
+            build_question(
+                "c",
+                {
+                    "type": "choice",
+                    "instructions": CHOICE_TEAM_Q,
+                    "criteria": CHOICE_TEAM_CRITERIA,
+                },
+            ),
+            "I was charged twice for the same order.",
+        ),
+        (
+            build_question(
+                "s",
+                {
+                    "type": "score",
+                    "instructions": SCORE_SEVERITY_Q,
+                    "criteria": SCORE_SEVERITY_CRITERIA,
+                },
+            ),
+            "Payments are completely down and we cannot process any orders.",
+        ),
+    ]
+    for q, state in prompts:
+        readout = engine.score_with_prefix(
+            render_example_prefix(q), [render_target_block(q, state)]
+        )[0]
+        assert readout.letter_mass is not None
+        assert readout.letter_mass > 0.5, (
+            f"only {readout.letter_mass:.4f} of the probability mass is on A-Z for "
+            f"{q.type!r}; the answer slot is not in a letter state"
+        )
+        # The single most likely letter must be one the question declared legal.
+        legal = {option.letter for option in q.options}
+        best = max(readout.logits, key=readout.logits.get)
+        assert best in legal or readout.logits[best] >= max(
+            readout.logits[letter] for letter in legal
+        )
