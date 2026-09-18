@@ -25,7 +25,7 @@ levels, so 1.0 can mean "confidently level 1" or "split between 0 and 2"; read i
 
 ```bash
 # from the repo root
-python demo/doom_demo.py       # real Doom via ViZDoom
+python demo/doom_demo.py       # real Doom via ViZDoom (add --watch to see it)
 python demo/game_demo.py       # text-adventure game
 python demo/web_nav_demo.py    # web-page navigation
 python demo/batch_demo.py      # 5 questions in 1 request
@@ -168,7 +168,25 @@ macOS Screen Recording permission.
 python demo/doom_demo.py                    # defend_the_center (default)
 python demo/doom_demo.py health_gathering   # walk onto medkits to survive
 python demo/doom_demo.py deadly_corridor    # fight down a corridor
+
+python demo/doom_demo.py --watch            # ...and actually watch it play
 ```
+
+### Watching it play
+
+`--watch` opens ViZDoom's own window (640x480, HUD and crosshair on, every skipped
+tic drawn so motion is continuous). This is the engine's native SDL renderer, not an
+OS screen grab, so it does not need macOS Screen Recording permission — the approach
+that failed when this demo was first attempted against `chocolate-doom`.
+
+The render cost lands inside `make_action`, outside the timed decision, so
+**per-decision latency is unchanged** (~177ms watched vs ~179ms headless). What drops
+is wall-clock throughput: **~4.5 decisions/sec watched vs ~5.5 headless**. Headless
+remains the default so the benchmark figures above stay reproducible.
+
+Resolution is safe to change: bearings are normalised by `screen_width / 2`, and the
+model reads engine labels rather than pixels, so the agent behaves identically at
+either resolution.
 
 Results from 40-decision runs:
 

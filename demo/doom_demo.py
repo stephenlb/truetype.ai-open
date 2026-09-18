@@ -14,10 +14,16 @@ Run:
     python demo/doom_demo.py                    # defend_the_center (default)
     python demo/doom_demo.py health_gathering   # walk onto medkits to survive
     python demo/doom_demo.py deadly_corridor    # fight down a corridor
+
+Add ``--watch`` to any of the above to open ViZDoom's window and see the gameplay
+as it happens (uses the engine's own renderer, so no screen-capture permission is
+involved). Rendering happens inside ``make_action``, so per-decision latency is
+unchanged; wall-clock throughput drops by roughly 20%.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -113,13 +119,32 @@ FRAME_SKIP = 4  # engine tics advanced per decision (Doom runs at 35 tics/sec)
 MAX_DECISIONS = 40
 
 
-def build_game(scenario: str) -> tuple[vzd.DoomGame, list[str]]:
-    """Load the scenario, restricted to the buttons this demo exposes."""
+def build_game(scenario: str, watch: bool = False) -> tuple[vzd.DoomGame, list[str]]:
+    """Load the scenario, restricted to the buttons this demo exposes.
+
+    With ``watch`` the engine opens its own SDL window and draws the game as it
+    plays. This is ViZDoom's native renderer, not an OS screen grab, so it needs no
+    macOS Screen Recording permission. The render cost lands inside ``make_action``,
+    outside the timed decision, so reported latency is unchanged while wall-clock
+    throughput drops (measured ~5.5 -> ~4.5 decisions/sec).
+    """
     cfg = Path(vzd.__file__).parent / "scenarios" / f"{scenario}.cfg"
     game = vzd.DoomGame()
     game.load_config(str(cfg))
-    game.set_window_visible(False)
-    game.set_screen_resolution(vzd.ScreenResolution.RES_320X240)
+    game.set_window_visible(watch)
+    if watch:
+        # Bigger window to actually watch, and draw every skipped tic so motion is
+        # continuous instead of jumping to the end state of each decision. Safe for
+        # the agent: bearings are normalised by screen_width/2, and the model reads
+        # engine labels, never pixels.
+        game.set_screen_resolution(vzd.ScreenResolution.RES_640X480)
+        game.set_render_all_frames(True)
+        # The scenario .cfg files ship with render_hud = false; turn the HUD and
+        # crosshair on so a human can follow health, ammo and aim.
+        game.set_render_hud(True)
+        game.set_render_crosshair(True)
+    else:
+        game.set_screen_resolution(vzd.ScreenResolution.RES_320X240)
     game.set_labels_buffer_enabled(True)
     game.set_available_game_variables(
         [vzd.GameVariable.HEALTH, vzd.GameVariable.AMMO2, vzd.GameVariable.KILLCOUNT]
@@ -209,10 +234,24 @@ def describe_state(state, scenario: str, screen_width: int, sticky: str | None =
 
 
 def main() -> None:
-    scenario = sys.argv[1] if len(sys.argv) > 1 else "defend_the_center"
-    if scenario not in SCENARIOS:
-        print(f"Unknown scenario {scenario!r}. Options: {', '.join(SCENARIOS)}")
-        return
+    parser = argparse.ArgumentParser(
+        description="Gemma 4 plays real Doom through ViZDoom, one letter per decision.",
+    )
+    parser.add_argument(
+        "scenario",
+        nargs="?",
+        default="defend_the_center",
+        choices=list(SCENARIOS),
+        help="which scenario to play (default: defend_the_center)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="open ViZDoom's window and render the gameplay while it plays "
+        "(per-decision latency is unchanged; throughput drops ~20%%)",
+    )
+    args = parser.parse_args()
+    scenario = args.scenario
 
     print_header(f"Real Doom via ViZDoom — scenario: {scenario}")
     print("Loading model (one-time cost)...")
@@ -221,13 +260,22 @@ def main() -> None:
     service.engine.load()
     print(f"Model loaded in {service.engine.load_seconds:.1f}s")
 
-    game, action_names = build_game(scenario)
+    game, action_names = build_game(scenario, watch=args.watch)
     screen_width = game.get_screen_width()
     criteria = {name: SCENARIOS[scenario]["actions"][name][1] for name in action_names}
     question = SCENARIOS[scenario]["question"]
 
     print(f"Engine: ViZDoom {vzd.__version__}   actions: {', '.join(action_names)}")
     print(f"Frame skip: {FRAME_SKIP} tics per decision")
+    if args.watch:
+        print(
+            f"Watching: {game.get_screen_width()}x{game.get_screen_height()} window, "
+            "HUD + crosshair on, all frames rendered."
+        )
+        print(
+            "Note: rendering runs inside make_action, so per-decision latency is "
+            "unchanged; wall-clock throughput drops ~20%."
+        )
 
     # Warm the question's KV prefix so decision 1 is not the only cold call. The
     # prefix depends on the question and criteria only, never on the game state.
