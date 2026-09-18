@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "truetype-replica"
+version = "0.1.0"
+description = "Local replica of the TypeSafe AI System One API using Gemma 4 letter logits"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "transformers",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx"]
+
+[project.scripts]
+truetype-api = "truetype.api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
