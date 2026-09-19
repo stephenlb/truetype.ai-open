@@ -36,10 +36,123 @@ python demo/latency_bench.py   # prefix-cache benchmark + correctness check
 
 | Demo | Task | Decision type | Latency (mean) |
 |------|------|---------------|----------------|
-| `doom_demo.py` | real Doom engine, 3 scenarios | choice (3-4 actions) | **~180ms** (5.4 decisions/sec) |
+| `doom_demo.py` | real Doom engine, 3 scenarios | choice (3-4 actions) | **~133ms** (7.2 decisions/sec) |
 | `game_demo.py` | 4-room text adventure | choice | ~500ms (every step a new prefix) |
-| `web_nav_demo.py` | support-portal refund flow | choice | ~700ms (every step a new prefix) |
-| `batch_demo.py` | 5 questions over 1 message | noul + choice + score | ~790ms warm / ~4.5s cold |
+| `web_nav_demo.py` | support-portal refund flow | choice | ~680ms (every step a new prefix) |
+| `batch_demo.py` | 5 questions over 1 message | noul + choice + score | ~815ms warm / ~4.3s cold |
+
+## The 150ms warm budget
+
+Every question in the suite, measured warm (`demo/latency_bench.py` asserts this):
+
+```
+Warm latency budget (<150ms per question, all 50 suite states):
+  noul_refund        p50= 121.4ms  p95= 130.1ms  ok
+  noul_urgency       p50= 106.2ms  p95= 126.7ms  ok
+  choice_team        p50= 128.8ms  p95= 138.9ms  ok
+  choice_sentiment   p50= 103.0ms  p95= 129.8ms  ok
+  score_severity     p50= 121.5ms  p95= 134.7ms  ok
+  doom_choice        p50= 130.4ms  p95= 131.8ms  ok
+
+  overall warm: n=55  p50=113.2ms  p95=134.2ms  max=138.9ms
+  budget check: PASS (all questions < 150ms at p95)
+```
+
+The assertion fails the benchmark if any question exceeds the budget, so a future
+prompt change cannot quietly regress it.
+
+### Where the time goes
+
+Profiling the warm path (Text `prefix=552 tok, tail=51 tok`):
+
+| Phase | Cost |
+|---|---|
+| tokenize full prompt | 1.5ms |
+| **forward (cached prefix + tail)** | **166ms** |
+| full-vocab logits `.float()` | 0.06ms |
+| letter slice (26 ids) + mass | 4.9ms |
+| `cache.crop` | 0.09ms |
+
+The forward pass is ~97% of the call. Two properties of it matter:
+
+- **The floor is ~60ms and barely depends on prefix length.** A 1-token tail against
+  a cached prefix measured 59ms at 128 tokens and 64ms at 552 tokens. Shrinking the
+  prefix is not a lever.
+- **Tail tokens cost ~2ms each.** Doom's 51-token state was 166ms; a 28-token state is
+  ~134ms. The tail is the only real lever, and it is what got this under budget.
+
+float16 was also tried and is no faster than bfloat16 (999ms vs 1000ms) — this
+workload is memory-bandwidth bound on weights, not compute bound.
+
+### Getting Doom under 150ms
+
+The Doom state tail was 51 tokens at 196ms. Cutting it to 28 tokens at ~134ms
+required two changes, each validated separately:
+
+1. **Drop health, ammo and proximity from the state.** None of them change which
+   action is correct (the action depends only on bearing), and including them cost a
+   disproportionate ~28ms: a 36-token tail ran 163ms while a 28-token tail ran 134ms.
+   Health and kills are still printed to the console for the human watching.
+2. **Keep the exact wording the criteria reference.** Paraphrasing scored 17/18 while
+   the literal `"bearing relative to crosshair"` / `"lined up in crosshair"` phrasing
+   scored 18/18 on the same states.
+
+Both were validated on a 252-case matrix (3 scenarios × 6 bearings × 4 proximity
+bands × 4 health/ammo states, expectations derived from the criteria text itself so
+the test could not encode a wrong answer): **252/252 before and after**, at 133-140ms
+warm. Live gameplay confirmed unchanged afterwards — 5 kills / reward 160 / 2 kills
+across the three scenarios.
+
+## Why not batch the questions into one forward pass?
+
+Because on this hardware batching buys almost nothing, and the cache buys a lot.
+Measured on 10 questions over one state (`demo/latency_bench.py`):
+
+```
+cache off (1 batched forward)    7687.3ms    <- all 10 prompts, one forward
+cache on, hard cap 8 (THRASH)    7909.7ms    hits+0 evictions+20
+cache on, auto-grown to 10       1599.6ms    4.81x vs off   hits+20 evictions+0
+```
+
+A batched forward still processes every prompt's full ~350-token prefix — batching
+parallelises the same tokens, it does not eliminate them. Forward time here scales
+with *total tokens processed* (~2ms/token), so one batched pass over 10 full prompts
+is ~7.7s no matter how many rows you stack. The 4.8x win comes entirely from the
+prefix KV cache: a warm call encodes only the ~20-token state tail instead of the
+~370-token full prompt. Different questions have different prefixes, so there is
+nothing shared to batch across them.
+
+This is why `system_one` scores questions **sequentially** against per-question
+cached prefixes rather than in one batched forward.
+
+### The capacity requirement (and the bug it caused)
+
+The LRU must hold **every** prefix a request uses. At 10 distinct questions with an
+8-entry capacity, the cache evicts a prefix before it is ever revisited: `hits+0,
+evictions+20`, warm latency 7909ms — *worse* than not caching at all (7687ms), and
+no error was raised.
+
+`ensure_prefix_capacity()` now grows the cache to the request's distinct-question
+count before scoring, clamped by `prefix_cache_hard_cap` (default 64, ~8GB of KV at
+the measured ~127MB/prefix) with a warning if a request exceeds the cap. Default
+capacity is 16. Test 52 covers grow / never-shrink / clamp.
+
+### Pre-warming
+
+`TypeSafeReplica.warm(questions)` pre-fills prefixes for known upcoming questions.
+`doom_demo.py` uses it so decision 1 is not the only cold call: before warming it
+spiked to ~1.2-1.5s; after, decision 1 is ~190ms.
+
+Warming does **not** make a first-seen question faster than one forward pass — a
+cache miss already costs exactly that. It relocates the unavoidable prefill to
+before the timed loop. That is a net win only when a prefix is reused many times
+(Doom reuses one prefix ~40 times, so 1.2s up front saves ~40s) and a net loss when
+it is used once (warming `game_demo`'s four one-shot room prefixes costs ~4.8s to
+save ~1.6s). `game_demo`, `web_nav_demo` and `batch_demo` are therefore left
+unwarmed on purpose.
+
+The API can warm at startup via `TYPESAFE_REPLICA_WARM_QUESTIONS` (a JSON object of
+question specs); it is off by default since unknown workloads gain nothing.
 
 ## The bug that passed every test
 
@@ -89,8 +202,9 @@ the prompt, not the model, was at fault.
 
 ## Latency work
 
-Two changes took a Doom decision from **1017ms to ~180ms (5.8x)** and the test suite
-from **39.8s to 15.6s**, with zero decision changes.
+These changes took a Doom decision from **1017ms to ~133ms (7.6x)**, the test suite
+from **39.8s to 15.6s**, and warm per-question latency under the 150ms budget above.
+Zero decision changes throughout.
 
 ### 1. Prefix KV caching
 
@@ -180,8 +294,8 @@ OS screen grab, so it does not need macOS Screen Recording permission — the ap
 that failed when this demo was first attempted against `chocolate-doom`.
 
 The render cost lands inside `make_action`, outside the timed decision, so
-**per-decision latency is unchanged** (~177ms watched vs ~179ms headless). What drops
-is wall-clock throughput: **~4.5 decisions/sec watched vs ~5.5 headless**. Headless
+**per-decision latency is unchanged** watched vs headless (~133ms both). What drops
+is wall-clock throughput: **~5.5 decisions/sec watched vs ~7.2 headless**. Headless
 remains the default so the benchmark figures above stay reproducible.
 
 Resolution is safe to change: bearings are normalised by `screen_width / 2`, and the
@@ -192,9 +306,9 @@ Results from 40-decision runs:
 
 | Scenario | Outcome | Latency (p50) | Throughput |
 |----------|---------|---------------|------------|
-| `defend_the_center` | 4 kills, health 100 | 179ms | 5.4 dec/sec |
-| `health_gathering` | health held at 100, reward 160 | 175ms | 5.5 dec/sec |
-| `deadly_corridor` | 2-3 kills, health 70 | 180ms | 5.4 dec/sec |
+| `defend_the_center` | 5 kills, health 100 | 133ms | 7.2 dec/sec |
+| `health_gathering` | health held at 100, reward 160 | 132ms | 7.5 dec/sec |
+| `deadly_corridor` | 2-3 kills, health 70 | 134ms | 7.2 dec/sec |
 
 The demo warms the question's KV prefix before the loop, so decision 1 is not the
 only cold call (it used to spike to ~1.3s).
@@ -216,7 +330,7 @@ only cold call (it used to spike to ~1.3s).
 
 ### Doom limits
 
-- At ~5.4 decisions/sec against an engine running 35 tics/sec, this is still **not
+- At ~7.2 decisions/sec against an engine running 35 tics/sec, this is still **not
   real-time Doom**. 40 decisions at 4 tics each covers ~4.6s of game time.
 - The state is a text reduction of the engine's labels, not pixels. The model reasons
   over a symbolic summary, not the frame.

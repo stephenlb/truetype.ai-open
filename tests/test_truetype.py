@@ -1,4 +1,4 @@
-"""51-test verification suite for the truetype.ai replica.
+"""52-test verification suite for the truetype.ai replica.
 
 50 functional tests (20 noul + 20 choice + 10 score) verify the model's top letter
 matches the expected answer for each prompt, and that the reported probability
@@ -7,6 +7,8 @@ distribution is a valid softmax over the legal option letters.
 Test 51 guards the readout contract itself: one token, A-Z only, and the letters
 actually holding the model's probability mass. That last property silently broke
 once while all 50 functional tests still passed.
+
+Test 52 guards the prefix-cache sizing that the warm-request speedup depends on.
 """
 
 from __future__ import annotations
@@ -15,7 +17,12 @@ import math
 
 import pytest
 
-from src.truetype.engine import MAX_NEW_TOKENS
+from src.truetype.engine import (
+    MAX_NEW_TOKENS,
+    PREFIX_CACHE_HARD_CAP,
+    EngineConfig,
+    GemmaLetterEngine,
+)
 from src.truetype.letters import LETTERS
 from src.truetype.questions import build_question, score_question
 from src.truetype.render import render_example_prefix, render_target_block
@@ -258,3 +265,38 @@ def test_single_token_letter_readout_contract(engine):
         assert best in legal or readout.logits[best] >= max(
             readout.logits[letter] for letter in legal
         )
+
+
+# ---------------------------------------------------------------------------
+# Structural test (2): prefix cache capacity must cover the request
+# ---------------------------------------------------------------------------
+
+def test_prefix_cache_capacity_covers_request():
+    """The LRU must hold every prefix a request uses, or the caching win vanishes.
+
+    Measured: 10 questions against an 8-entry cache ran at 8051ms because each
+    prefix was evicted before it was ever revisited; a 10-entry cache ran the same
+    request at 1771ms. Capacity is therefore grown per request, clamped by a hard
+    cap that bounds KV memory. Pure logic — no model load, so it stays fast.
+    """
+    engine = GemmaLetterEngine(EngineConfig(prefix_cache=True))
+    assert engine.config.max_cached_prefixes == 16  # default
+
+    # Grows to fit a request larger than the default.
+    assert engine.ensure_prefix_capacity(30) == 30
+    assert engine.config.max_cached_prefixes == 30
+
+    # Never shrinks, so a small request does not evict a warmed large cache.
+    assert engine.ensure_prefix_capacity(3) == 30
+    assert engine.config.max_cached_prefixes == 30
+
+    # Clamped at the hard cap, and warns rather than pretending it fits.
+    assert engine.ensure_prefix_capacity(10_000) == PREFIX_CACHE_HARD_CAP
+    assert engine.config.max_cached_prefixes == PREFIX_CACHE_HARD_CAP
+
+    # A custom lower cap is respected (memory-constrained machines).
+    small = GemmaLetterEngine(
+        EngineConfig(prefix_cache=True, max_cached_prefixes=2, prefix_cache_hard_cap=4)
+    )
+    assert small.ensure_prefix_capacity(99) == 4
+    assert small.ensure_prefix_capacity(1) == 4

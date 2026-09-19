@@ -208,27 +208,31 @@ def nearest_target(state, scenario: str, screen_width: int, sticky: str | None =
 
 
 def describe_state(state, scenario: str, screen_width: int, sticky: str | None = None) -> tuple[str, str, str | None]:
-    """Build the prompt. The decisive fact is deliberately the last line."""
-    kind = SCENARIOS[scenario]["target_kind"]
-    health, ammo, _kills = (int(v) for v in state.game_variables)
-    target = nearest_target(state, scenario, screen_width, sticky)
+    """Build the prompt.
 
-    head = f"Doom. Health: {health}. Ammo: {ammo}."
+    Two deliberate choices, both measured (see demo/README.md):
+
+    * **Bearing is the decisive fact**, so it is the second-to-last line and the
+      crosshair line is last. The state omits health, ammo and proximity: none of
+      them change which action is correct, and including them cost ~28ms per
+      decision (36-token tail ran 163ms vs 134ms for a 28-token tail) while
+      scoring identically. Health and kills are still printed to the console.
+    * **Wording mirrors the criteria** ("bearing relative to crosshair",
+      "lined up in crosshair"). Paraphrasing it scored 17/18 where the exact
+      wording scored 18/18 on the same states.
+    """
+    kind = SCENARIOS[scenario]["target_kind"]
+    target = nearest_target(state, scenario, screen_width, sticky)
+    subject = kind.capitalize()
+
     if target is None:
-        text = (
-            f"{head}\n"
-            f"No {kind} is visible on screen.\n"
-            f"Nearest {kind} bearing relative to crosshair: none visible.\n"
-            f"{kind.capitalize()} lined up in crosshair: no."
-        )
+        text = f"No {kind} is visible on screen.\n{subject} lined up in crosshair: no."
         return text, f"no {kind} visible", None
 
     name, bearing, centred, proximity, object_id = target
     text = (
-        f"{head}\n"
-        f"Nearest {kind}: {name} at {proximity}.\n"
-        f"{kind.capitalize()} bearing relative to crosshair: {bearing}.\n"
-        f"{kind.capitalize()} lined up in crosshair: {'yes' if centred else 'no'}."
+        f"{subject} bearing relative to crosshair: {bearing}.\n"
+        f"{subject} lined up in crosshair: {'yes' if centred else 'no'}."
     )
     return text, f"{name} {bearing}, {proximity}", object_id
 
@@ -278,16 +282,10 @@ def main() -> None:
         )
 
     # Warm the question's KV prefix so decision 1 is not the only cold call. The
-    # prefix depends on the question and criteria only, never on the game state.
-    from truetype.questions import build_question
-    from truetype.render import render_example_prefix, render_target_block
-
-    warm_q = build_question("act", {"type": "choice", "instructions": question, "criteria": criteria})
-    t0 = time.perf_counter()
-    service.engine.score_with_prefix(
-        render_example_prefix(warm_q), [render_target_block(warm_q, "warmup")]
-    )
-    print(f"Prefix warmed in {(time.perf_counter()-t0)*1000:.0f}ms\n")
+    # prefix depends on the question and criteria only, never on the game state,
+    # and this loop reuses it ~40 times, so the one-time prefill pays for itself.
+    warm_ms = service.warm({"act": {"type": "choice", "instructions": question, "criteria": criteria}})
+    print(f"Prefix warmed in {warm_ms:.0f}ms\n")
 
     game.new_episode()
     latency = LatencyLog("decision")

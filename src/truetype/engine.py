@@ -48,6 +48,11 @@ MAX_NEW_TOKENS = 1
 # expected values and make `confidence` meaningful.
 DEFAULT_TEMPERATURE = 0.7
 
+# Upper bound on cached prefixes. At the measured ~127MB of KV per 369-token
+# prefix, 64 entries is ~8GB on top of the ~24GB of weights. The count is
+# configurable so smaller machines can lower it.
+PREFIX_CACHE_HARD_CAP = 64
+
 
 @dataclass
 class EngineConfig:
@@ -63,10 +68,14 @@ class EngineConfig:
     # 70-85% of a prompt and identical for every call on the same question, so
     # caching it removes most of the prefill work (~2.9x faster per decision).
     prefix_cache: bool = True
-    # Each cached prefix costs ~127MB of KV at 369 tokens. This must be >= the
+    # Each cached prefix costs ~127MB of KV at 369 tokens. This MUST be >= the
     # number of distinct questions in a request or the LRU thrashes and every call
-    # re-pays the full prefill.
-    max_cached_prefixes: int = 8
+    # re-pays the full prefill — which silently erases the entire speedup. The
+    # service auto-grows this per request (see ensure_prefix_capacity), bounded by
+    # prefix_cache_hard_cap, so callers do not have to get it right by hand.
+    max_cached_prefixes: int = 16
+    # Ceiling for auto-growth. Lower this on memory-constrained machines.
+    prefix_cache_hard_cap: int = PREFIX_CACHE_HARD_CAP
     extra: dict = field(default_factory=dict)
 
 
@@ -86,6 +95,7 @@ class GemmaLetterEngine:
         self._prefix_caches: "OrderedDict[str, tuple[object, object]]" = OrderedDict()
         self.prefix_cache_hits = 0
         self.prefix_cache_misses = 0
+        self.prefix_cache_evictions = 0
 
     # ------------------------------------------------------------------ loading
 
@@ -264,6 +274,30 @@ class GemmaLetterEngine:
 
     # ------------------------------------------------------------ prefix caching
 
+    def ensure_prefix_capacity(self, distinct_prefixes: int) -> int:
+        """Grow the prefix cache so a request with this many distinct prefixes fits.
+
+        The LRU must hold every prefix a request will use, otherwise it evicts one
+        before that prefix is ever revisited and every call re-pays a full prefill —
+        silently costing the entire caching win. Growth is one-way (never shrinks)
+        and clamped to ``prefix_cache_hard_cap``; if the request exceeds the cap we
+        warn, because the caller's latency will be worse than they probably expect.
+        """
+        target = max(1, int(distinct_prefixes))
+        cap = max(1, int(self.config.prefix_cache_hard_cap))
+        if target > cap:
+            logger.warning(
+                "request has %d distinct question prefixes, above the cache cap of %d; "
+                "prefixes will thrash and warm-request latency will be no better than "
+                "a cold run. Raise EngineConfig.prefix_cache_hard_cap (each entry is "
+                "~127MB of KV) or split the request.",
+                target,
+                cap,
+            )
+        grown = min(max(target, self.config.max_cached_prefixes), cap)
+        self.config.max_cached_prefixes = grown
+        return grown
+
     def score_with_prefix(
         self,
         prefix: str,
@@ -376,6 +410,7 @@ class GemmaLetterEngine:
                 self._prefix_caches[prefix] = (cache, prefix_ids)
                 while len(self._prefix_caches) > max(1, self.config.max_cached_prefixes):
                     self._prefix_caches.popitem(last=False)
+                    self.prefix_cache_evictions += 1
 
             return (
                 batch_letter_logits(next_token_logits, self._letter_token_ids)[0],

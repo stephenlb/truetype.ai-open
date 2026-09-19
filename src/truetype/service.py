@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 
 from .engine import DEFAULT_TEMPERATURE, EngineConfig, GemmaLetterEngine
@@ -31,6 +32,30 @@ class TypeSafeReplica:
         self.engine = engine or GemmaLetterEngine(EngineConfig())
         self.model_name = model_name
 
+    def warm(self, questions: dict[str, dict]) -> float:
+        """Pre-fill the prefix KV cache for questions we know are coming.
+
+        Warming does not make a first-seen question faster than one forward pass —
+        the miss path already costs exactly that. What it does is relocate the
+        unavoidable prefill to before the caller's timed loop, so per-decision
+        latency is uniform and no request stalls mid-stream. That is a net win only
+        when a prefix is reused many times (a Doom loop reuses one prefix ~40 times)
+        and a net loss when it is used once (warming four one-shot rooms costs ~4.8s
+        to save ~1.6s). Returns the elapsed milliseconds.
+        """
+        started = time.perf_counter()
+        parsed = [build_question(qid, spec) for qid, spec in questions.items()]
+        if not parsed:
+            return 0.0
+        if self.engine.config.prefix_cache:
+            self.engine.ensure_prefix_capacity(len(parsed))
+        for question in parsed:
+            self.engine.score_with_prefix(
+                render_example_prefix(question),
+                [render_target_block(question, "warmup")],
+            )
+        return (time.perf_counter() - started) * 1000
+
     def system_one(
         self,
         *,
@@ -54,6 +79,12 @@ class TypeSafeReplica:
             # a time against their own cached prefix. Sequential cached calls beat a
             # single uncached batch: the prefill saved per question is far larger
             # than anything batching buys on this hardware.
+            #
+            # Capacity must cover every prefix in the request or the LRU evicts one
+            # before it is ever revisited, turning every call into a miss and erasing
+            # the win entirely (measured: 10 questions with an 8-entry cache ran at
+            # 8051ms vs 1771ms with a 10-entry cache).
+            self.engine.ensure_prefix_capacity(len(parsed))
             distributions = []
             for question in parsed:
                 distributions.extend(

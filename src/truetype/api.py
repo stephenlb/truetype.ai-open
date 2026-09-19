@@ -7,14 +7,23 @@ primitives this replica supports. The response shape matches TypeSafe's docs:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .engine import DEFAULT_TEMPERATURE, EngineConfig, GemmaLetterEngine
+from .engine import (
+    DEFAULT_TEMPERATURE,
+    PREFIX_CACHE_HARD_CAP,
+    EngineConfig,
+    GemmaLetterEngine,
+)
 from .service import TypeSafeReplica
+
+logger = logging.getLogger(__name__)
 
 _api_key = os.environ.get("TYPESAFE_REPLICA_API_KEY")
 
@@ -49,10 +58,27 @@ async def lifespan(app: FastAPI):
         # Prefix KV caching makes repeat questions ~5x faster. The first request for
         # a given question shape pays a normal (uncached) forward pass to populate it.
         prefix_cache=os.environ.get("TYPESAFE_REPLICA_PREFIX_CACHE", "1") not in {"0", "false", "False"},
-        max_cached_prefixes=int(os.environ.get("TYPESAFE_REPLICA_MAX_CACHED_PREFIXES", "8")),
+        max_cached_prefixes=int(os.environ.get("TYPESAFE_REPLICA_MAX_CACHED_PREFIXES", "16")),
+        prefix_cache_hard_cap=int(
+            os.environ.get("TYPESAFE_REPLICA_PREFIX_CACHE_HARD_CAP", str(PREFIX_CACHE_HARD_CAP))
+        ),
     ))
     engine.load()
-    _state["service"] = TypeSafeReplica(engine)
+    service = TypeSafeReplica(engine)
+
+    # Optional startup warming for known hot questions, as a JSON object of question
+    # specs: {"refund": {"type": "noul", "instructions": "..."}, ...}. Off by default:
+    # warming only pays off for prefixes that will be reused many times.
+    warm_spec = os.environ.get("TYPESAFE_REPLICA_WARM_QUESTIONS")
+    if warm_spec:
+        try:
+            questions = json.loads(warm_spec)
+            ms = service.warm(questions)
+            logger.info("warmed %d question prefix(es) in %.0fms", len(questions), ms)
+        except Exception:
+            logger.exception("failed to warm TYPESAFE_REPLICA_WARM_QUESTIONS; continuing unwarmed")
+
+    _state["service"] = service
     yield
     _state.clear()
 
@@ -82,7 +108,10 @@ def health() -> dict:
             "enabled": engine.config.prefix_cache,
             "hits": engine.prefix_cache_hits,
             "misses": engine.prefix_cache_misses,
+            "evictions": engine.prefix_cache_evictions,
             "entries": len(engine._prefix_caches),
+            "capacity": engine.config.max_cached_prefixes,
+            "hard_cap": engine.config.prefix_cache_hard_cap,
         },
     }
 
