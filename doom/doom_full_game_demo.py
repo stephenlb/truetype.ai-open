@@ -1,19 +1,17 @@
-"""Advanced Doom demo: Gemma 4 plays a real Doom level through ViZDoom.
+"""Gemma 4 plays a full Doom level through ViZDoom.
 
-The reference demo (``demo/doom_demo.py``) plays the three bundled arena scenarios
-with a fixed three-button action set. This one plays a **full level** - Freedoom
-MAP01 by default, or any IWAD/map you point it at - using the engine's object data
-to build a real battlefield report.
+The reference demo (``demo/doom_demo.py``) plays three bundled arena scenarios
+with a fixed action set. This demo plays Freedoom MAP01 by default, or another
+IWAD and map supplied by the user. It builds the state report from engine data.
 
-What is different
------------------
-* **Not pixels.** Every decision is a short text report built from the engine's own
-  objects: monster species, exact bearing in signed degrees, distance, whether the
-  player is being hurt by something it cannot see, and how much clearance the ray
-  cast finds to the left, right and rear. No screen capture, no OS permission.
-* **Three specialised questions instead of one.** The phase is chosen
-  deterministically from the state, and the model answers the genuinely ambiguous
-  question for that phase:
+Implementation
+--------------
+The demo builds each decision from engine objects rather than pixels. The report
+includes monster species, bearing, distance, unseen damage, and clearance. It
+does not require screen capture or OS permission.
+
+The code selects a phase from the state, then asks the model one question for
+that phase:
 
   ==============  ==================================================================
   ``combat``      monsters in view: shoot / advance / turn left / turn right / back off
@@ -21,31 +19,30 @@ What is different
   ``navigate``    nothing to fight and not stuck: forward / turn left / turn right
   ==============  ==================================================================
 
-* **Real pathfinding.** The engine hands over every blocking line in the level, so
-  the demo builds a walkability grid and routes with BFS. The model is pointed at
-  the next waypoint on that route, not at the distant item, which turns a hard
-  "walk around this wall" judgement into a local "head that way" instruction. This
-  is the single biggest change from the first version, which reacted to nearby
-  geometry and re-decided a direction every tick; that shuffles at walls.
-* **The forward band and the state's words agree exactly.** "dead ahead" and
-  "slightly left/right" are inside the 25-degree forward band; "far left/right" is
-  a turn. When the words and the band disagreed, a -22 degree waypoint read as
-  forward sent the agent into the wall beside a doorway for 55 decisions.
-* **Doors open on approach.** A closed door never appears in the object list, so
-  the model cannot be asked about one. Forward movement holds USE, and a blocked
-  forward retries several times before the state calls the player stuck, because a
-  door needs about four presses. Treating the first failure as "stuck" made the
-  agent strafe away from every door.
-* **Escalating stuck handling.** After two failed sideways attempts the report says
-  so (which is what makes ``back_up`` the answer); after four, the demo presses the
-  engine's TURN180 button and walks out the way it came - a button, so it costs no
-  inference.
-* **Weapon management.** When the selected weapon is out of ammo the demo switches
-  to the best owned weapon that still has ammo before asking the model, so
-  ``shoot`` always fires something.
-* **A self-test.** ``--self-test`` checks all three questions against synthetic
-  states built by the same functions the live loop uses, so a wording regression is
-  caught without needing the engine.
+The engine supplies the level's blocking lines. The demo builds a walkability
+grid, routes with BFS, and points the model toward the next waypoint instead of
+the distant item. This avoids repeated direction changes at walls.
+
+The forward band matches the state wording. "dead ahead" and "slightly
+left/right" are inside the 25-degree forward band; "far left/right" requires a
+turn. When the words and the band disagreed, a -22 degree waypoint read as
+forward and sent the agent into the wall beside a doorway for 55 decisions.
+
+A closed door does not appear in the object list, so the model cannot be asked
+about one. Forward movement holds USE. A blocked move retries several times
+before the state calls the player stuck because a door needs about four presses.
+Treating the first failure as "stuck" made the agent strafe away from every door.
+
+After two failed sideways attempts, the report records the failures, which makes
+``back_up`` the expected answer. After four, the demo presses the engine's
+TURN180 button and walks out the way it came. The button costs no inference.
+
+When the selected weapon is out of ammo, the demo switches to the best owned
+weapon with ammunition before asking the model.
+
+``--self-test`` checks all three questions against synthetic states built by the
+same functions as the live loop. It catches wording regressions without running
+the engine.
 
 Run (from the repo root):
     python doom/doom_full_game_demo.py                    # Freedoom 2 MAP01
@@ -227,7 +224,7 @@ NAVIGATION_ACTIONS: dict[str, tuple[dict, int]] = {
 COMBAT_CRITERIA = {
     # 350 units, not 700: the pistol's spread means a distant monster is a 3-pixel
     # sprite and shots miss it. A 700-unit "shoot" rule produced 229 shots and no
-    # kills; at 350 the agent closes to a range where its hitscan actually lands.
+    # kills; at 350 the agent closes to a range where its hitscan lands.
     # "close range" / "far away" match the words in the state report exactly.
     "shoot": "Fire - monster at close range, under 350 units, health 30 or more",
     "advance": "Walk forward - monster far away, over 350 units, health 30 or more",
@@ -649,7 +646,7 @@ def build_snapshot(
     """Reduce one engine frame to the contacts, status and clearance report.
 
     Monsters come from the *labels* buffer, which only holds objects the engine
-    drew this frame - i.e. what the player can actually see. Pickups come from the
+    drew this frame, meaning what the player can see. Pickups come from the
     full object list so an objective behind the player still steers the next turn.
     """
     health = int(game.get_game_variable(vzd.GameVariable.HEALTH))
@@ -769,7 +766,7 @@ def build_snapshot(
             else:
                 snap.waypoint = grid.next_waypoint((px, py), target)
                 if snap.waypoint is None:
-                    # Genuinely sealed off: drop it now rather than walking at it.
+                    # The route is sealed off, so drop it instead of walking at it.
                     navigation.objective_id = None
                     snap.objective = explore_objective(snap, grid)
                     if snap.objective is not None:
@@ -1075,7 +1072,7 @@ def action_table(phase: str) -> dict[str, tuple[dict, int]]:
 
 # ---------------------------------------------------------------------- self test
 # Synthetic situations run through the same builders the live loop uses, so the
-# strings under test are the strings the model actually sees. A hand-written copy
+# strings under test are the strings sent to the model. A hand-written copy
 # of the wording drifts the moment range bands or bearing words change, and a test
 # that checks a paraphrase proves nothing.
 def _combat_case(health: int, distance: float, bearing: float) -> str:
@@ -1281,7 +1278,7 @@ def run_episode(
         phase = next_phase(snap, stuck=blocked_now)
 
         # Give up on a real pickup the agent cannot make progress toward. Pathfinding
-        # filters out genuinely unreachable items, but a route can still be long and
+        # filters out unreachable items, but a route can still be long and
         # the agent can wedge on geometry the grid's coarse cells treat as open; if
         # the closest approach has not improved for 20 navigation decisions, drop it.
         if (

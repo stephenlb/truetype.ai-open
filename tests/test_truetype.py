@@ -5,7 +5,7 @@ matches the expected answer for each prompt, and that the reported probability
 distribution is a valid softmax over the legal option letters.
 
 Test 51 guards the readout contract itself: one token, A-Z only, and the letters
-actually holding the model's probability mass. That last property silently broke
+holding the model's probability mass. That last property broke
 once while all 50 functional tests still passed.
 
 Test 52 guards the prefix-cache sizing that the warm-request speedup depends on.
@@ -277,7 +277,7 @@ def test_prefix_cache_capacity_covers_request():
     Measured: 10 questions against an 8-entry cache ran at 8051ms because each
     prefix was evicted before it was ever revisited; a 10-entry cache ran the same
     request at 1771ms. Capacity is therefore grown per request, clamped by a hard
-    cap that bounds KV memory. Pure logic — no model load, so it stays fast.
+    cap that bounds KV memory. This test does not load the model.
     """
     engine = GemmaLetterEngine(EngineConfig(prefix_cache=True))
     assert engine.config.max_cached_prefixes == 16  # default

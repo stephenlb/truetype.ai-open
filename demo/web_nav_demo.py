@@ -1,8 +1,8 @@
 """Web-page navigation demo: Gemma 4 as a fast decision layer over page state.
 
 Simulates a support portal with three pages (home, articles, ticket). The model
-reads the current page text and decides the next action — click a link, fill a
-field, or submit — via a single-letter readout. Every decision is timed.
+reads the current page text and chooses whether to click a link, fill a field, or
+submit the form through a single-letter readout. Every decision is timed.
 
 Run:
     python demo/web_nav_demo.py
@@ -84,7 +84,7 @@ QUESTION = "What is the next best action to help the user get a refund for a dup
 
 
 def main() -> None:
-    print_header("Web-Page Navigation — Gemma 4 as a decision layer over page state")
+    print_header("Web-Page Navigation: Gemma 4 as a decision layer over page state")
     print("Goal: user wants a refund for a duplicate charge.")
     print("Loading model (one-time cost)...")
 

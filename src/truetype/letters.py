@@ -1,9 +1,8 @@
-"""Single-letter logit extraction and top-k softmax scoring.
+"""Extract single-letter logits and compute top-k softmax scores.
 
-The whole idea of this replica: ask Gemma 4 for exactly one token, restricted to
-the 26 uppercase ASCII letters A-Z. We never sample, we never decode text. We read
-the next-token logits at the single position where the answer lives, keep the top-k
-of the *letter* logits, and softmax them into a probability distribution.
+The engine reads one next-token position, keeps logits for the 26 uppercase
+ASCII letters, and converts the top-k letter logits into a probability
+distribution. It does not sample or decode text.
 """
 
 from __future__ import annotations
@@ -27,11 +26,11 @@ class LetterLogitError(ValueError):
 class LetterReadout:
     """The full 26-letter logit readout for one prompt, plus a top-k view.
 
-    ``logits`` keeps every letter so a question with more options than ``top_k`` is
-    never silently truncated. ``top`` is the reported top-k softmax distribution.
+    ``logits`` keeps every letter when a question has more options than ``top_k``.
+    ``top`` is the reported top-k softmax distribution.
     ``letter_mass`` is how much of the model's *full-vocabulary* probability landed
-    on the 26 letters we scored: a sanity check that the prompt really does put the
-    model in a "next token is a letter" state. If it collapses toward zero the
+    on the 26 letters we scored. This checks whether the prompt puts the
+    model in a "next token is a letter" state. If it approaches zero, the
     readout is measuring noise in the tail of the distribution, even though an
     argmax over it may still look plausible.
     """
@@ -138,8 +137,8 @@ def batch_letter_mass(
 ) -> list[float]:
     """Fraction of full-vocabulary probability sitting on the A-Z tokens, per row.
 
-    Computed with a log-sum-exp over the vocabulary so it is numerically safe and
-    costs one reduction rather than a full softmax materialisation.
+    Uses log-sum-exp over the vocabulary to avoid overflow and replace a full
+    softmax with one reduction.
     """
     import torch
 

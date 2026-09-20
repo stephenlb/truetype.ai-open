@@ -35,13 +35,12 @@ class TypeSafeReplica:
     def warm(self, questions: dict[str, dict]) -> float:
         """Pre-fill the prefix KV cache for questions we know are coming.
 
-        Warming does not make a first-seen question faster than one forward pass —
-        the miss path already costs exactly that. What it does is relocate the
-        unavoidable prefill to before the caller's timed loop, so per-decision
-        latency is uniform and no request stalls mid-stream. That is a net win only
-        when a prefix is reused many times (a Doom loop reuses one prefix ~40 times)
-        and a net loss when it is used once (warming four one-shot rooms costs ~4.8s
-        to save ~1.6s). Returns the elapsed milliseconds.
+        Warming does not make a first-seen question faster than one forward pass;
+        the miss path already costs that. It moves the prefill before the caller's
+        timed loop, which keeps per-decision latency uniform. Reused prefixes
+        benefit: a Doom loop uses one prefix about 40 times. One-shot prefixes do
+        not: warming four rooms costs about 4.8 seconds to save 1.6 seconds.
+        Returns the elapsed milliseconds.
         """
         started = time.perf_counter()
         parsed = [build_question(qid, spec) for qid, spec in questions.items()]

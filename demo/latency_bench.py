@@ -141,7 +141,7 @@ TEN_Q = {
 
 
 def doom_state(bearing: str) -> str:
-    """Doom's state tail, matching what demo/doom_demo.py actually sends.
+    """Doom's state tail, matching what demo/doom_demo.py sends.
 
     Kept deliberately in sync with ``describe_state`` there: bearing only, no
     health/ammo/proximity. Those fields do not change the correct action and cost

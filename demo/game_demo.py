@@ -80,7 +80,7 @@ MAX_STEPS = 10
 
 
 def main() -> None:
-    print_header("Text Adventure — Gemma 4 as a real-time game controller")
+    print_header("Text Adventure: Gemma 4 as a real-time game controller")
     print("Goal: open the locked chest. Start: cave mouth.")
     print("Loading model (one-time cost)...")
 
@@ -148,7 +148,7 @@ def main() -> None:
                     print("\nYou unlock the chest with the key. Inside is the treasure. You win!")
                     break
                 else:
-                    print("        (chest is locked — you need a key)")
+                    print("        (chest is locked; you need a key)")
         visited.append(current)
     else:
         print(f"\nDid not open the chest in {MAX_STEPS} steps.")

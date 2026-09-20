@@ -1,7 +1,6 @@
 """Batch-throughput demo: many questions over one state in a single call.
 
-Shows the latency advantage of the TypeSafe batch contract: submit 5 questions
-about the same customer message in one request and measure total wall time.
+Submits five questions about one customer message and measures total wall time.
 
 Run:
     python demo/batch_demo.py
@@ -52,7 +51,7 @@ QUESTIONS = {
 
 
 def main() -> None:
-    print_header("Batch Throughput — 5 questions, 1 state, 1 forward pass each")
+    print_header("Batch Throughput: 5 questions, 1 state, 1 forward pass each")
     print("Loading model (one-time cost)...")
 
     service = TypeSafeReplica()

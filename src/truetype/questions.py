@@ -1,8 +1,8 @@
 """Map Gemma letter logits onto TypeSafe's three question primitives.
 
-The letter distribution is the model's raw output. Each primitive renormalizes it
-over the letters that are legal answers for that question, so probabilities always
-sum to 1 across exactly the options the caller defined.
+The letter distribution is the model's raw output. Each primitive renormalizes
+the distribution over its legal answer letters, so the probabilities sum to 1
+across the caller's options.
 """
 
 from __future__ import annotations

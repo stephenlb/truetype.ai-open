@@ -54,6 +54,9 @@ _state: dict = {}
 async def lifespan(app: FastAPI):
     engine = GemmaLetterEngine(EngineConfig(
         model_id=os.environ.get("TYPESAFE_REPLICA_MODEL_ID", "google/gemma-4-12B"),
+        # "auto" picks cuda, then mps, then cpu; dtype "auto" is bfloat16 off cpu.
+        device=os.environ.get("TYPESAFE_REPLICA_DEVICE", "auto"),
+        dtype=os.environ.get("TYPESAFE_REPLICA_DTYPE", "auto"),
         top_k=int(os.environ.get("TYPESAFE_REPLICA_TOP_K", "5")),
         # Prefix KV caching makes repeat questions ~5x faster. The first request for
         # a given question shape pays a normal (uncached) forward pass to populate it.
@@ -66,9 +69,8 @@ async def lifespan(app: FastAPI):
     engine.load()
     service = TypeSafeReplica(engine)
 
-    # Optional startup warming for known hot questions, as a JSON object of question
-    # specs: {"refund": {"type": "noul", "instructions": "..."}, ...}. Off by default:
-    # warming only pays off for prefixes that will be reused many times.
+    # Warm known, frequently reused questions at startup. The value is a JSON
+    # object of question specs: {"refund": {"type": "noul", "instructions": "..."}, ...}.
     warm_spec = os.environ.get("TYPESAFE_REPLICA_WARM_QUESTIONS")
     if warm_spec:
         try:

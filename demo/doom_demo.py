@@ -1,9 +1,8 @@
 """Real Doom demo: Gemma 4 plays Doom through ViZDoom.
 
-This runs the actual Doom engine. ViZDoom is a ZDoom fork built for AI agents and
-ships the Freedoom IWADs, so there is no screen capture and no OS permission
-needed: object labels, health, ammo and kill count come straight out of the
-engine each tick.
+ViZDoom runs the Doom engine and includes the Freedoom IWADs. The demo reads
+object labels, health, ammo, and kill count from the engine, so it needs no
+screen capture or OS permission.
 
 Each tick the engine state is reduced to a short text prompt whose final line is
 the decisive fact (where the target sits relative to the crosshair). Gemma 4
@@ -133,7 +132,7 @@ def build_game(scenario: str, watch: bool = False) -> tuple[vzd.DoomGame, list[s
     game.load_config(str(cfg))
     game.set_window_visible(watch)
     if watch:
-        # Bigger window to actually watch, and draw every skipped tic so motion is
+        # Use a larger window and draw every skipped tic so motion is
         # continuous instead of jumping to the end state of each decision. Safe for
         # the agent: bearings are normalised by screen_width/2, and the model reads
         # engine labels, never pixels.
@@ -212,12 +211,12 @@ def describe_state(state, scenario: str, screen_width: int, sticky: str | None =
 
     Two deliberate choices, both measured (see demo/README.md):
 
-    * **Bearing is the decisive fact**, so it is the second-to-last line and the
+- Bearing determines the action, so it is the second-to-last line and the
       crosshair line is last. The state omits health, ammo and proximity: none of
       them change which action is correct, and including them cost ~28ms per
       decision (36-token tail ran 163ms vs 134ms for a 28-token tail) while
       scoring identically. Health and kills are still printed to the console.
-    * **Wording mirrors the criteria** ("bearing relative to crosshair",
+- The wording matches the criteria ("bearing relative to crosshair",
       "lined up in crosshair"). Paraphrasing it scored 17/18 where the exact
       wording scored 18/18 on the same states.
     """
@@ -257,7 +256,7 @@ def main() -> None:
     args = parser.parse_args()
     scenario = args.scenario
 
-    print_header(f"Real Doom via ViZDoom — scenario: {scenario}")
+    print_header(f"Real Doom via ViZDoom: scenario {scenario}")
     print("Loading model (one-time cost)...")
 
     service = TypeSafeReplica()

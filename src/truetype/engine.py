@@ -1,15 +1,12 @@
-"""Gemma 4 base-completion engine: one forward pass, one token, letter logits.
+"""Gemma 4 base-completion engine using one forward pass and one-token answers.
 
 Design notes
 ------------
-* We load the *base* model (``google/gemma-4-12B``), not the instruct variant.
-  Base models are pure next-token predictors: no chat template, no thinking
-  channel, no multi-token preamble to fight. The letter that follows our prompt
-  *is* the answer, and its logit is directly comparable across questions.
-* ``MAX_NEW_TOKENS = 1`` is enforced *structurally*, not by a generation limit: we
-  run a single ``forward`` and read the logits at the last position. Nothing is
-  sampled and there is no decode loop, so the model cannot emit a second token
-  even in principle.
+* The code loads the base model (``google/gemma-4-12B``). Base models predict the
+  next token without a chat template or multi-token preamble. The letter after
+  the prompt is the answer.
+* The code enforces ``MAX_NEW_TOKENS = 1`` by running one ``forward`` call and
+  reading the logits at the last position. It does not sample or decode text.
 * The readout is restricted to the 26 uppercase letters A-Z, all drawn from one
   token variant so their logits are comparable, then softmaxed at a low
   temperature over just the letters a given question declares legal.
@@ -41,8 +38,8 @@ DEFAULT_MODEL_ID = "google/gemma-4-12B"
 # single forward, logits at one position) rather than a cap we ask it to respect.
 MAX_NEW_TOKENS = 1
 
-# Softmax temperature for turning letter logits into a distribution. Moderately
-# low: it sharpens the readout toward the model's preferred letter and keeps the
+# Softmax temperature for turning letter logits into a distribution. A low value
+# sharpens the readout toward the model's preferred letter and keeps the
 # reported probabilities/scores close to discrete levels. It cannot change the
 # argmax for noul/choice (a monotonic transform), but it does tighten `score`
 # expected values and make `confidence` meaningful.
@@ -70,7 +67,7 @@ class EngineConfig:
     prefix_cache: bool = True
     # Each cached prefix costs ~127MB of KV at 369 tokens. This MUST be >= the
     # number of distinct questions in a request or the LRU thrashes and every call
-    # re-pays the full prefill — which silently erases the entire speedup. The
+    # repeats the full prefill, erasing the speedup. The
     # service auto-grows this per request (see ensure_prefix_capacity), bounded by
     # prefix_cache_hard_cap, so callers do not have to get it right by hand.
     max_cached_prefixes: int = 16
@@ -80,7 +77,7 @@ class EngineConfig:
 
 
 class GemmaLetterEngine:
-    """Lazily-loaded, thread-safe wrapper that turns prompts into letter distributions."""
+    """Thread-safe wrapper that loads on first use and returns letter distributions."""
 
     def __init__(self, config: EngineConfig | None = None) -> None:
         self.config = config or EngineConfig()
@@ -167,11 +164,10 @@ class GemmaLetterEngine:
         continuation is the space-prefixed letter (``"▁Y"``), matching how the
         few-shot examples tokenize. We therefore prefer the ``" A"`` forms.
 
-        The whole 26-letter set must come from *one* variant. Falling back
+        The 26-letter set must come from one variant. Falling back
         per-letter could mix ``"▁Q"`` with a bare ``"Q"``, and logits for tokens of
-        different shapes are not comparable — that would silently corrupt the
-        argmax. So we require all 26 to be single tokens in the same variant and
-        fail loudly otherwise.
+        different shapes are not comparable. All 26 must be single tokens in the
+        same variant.
         """
         assert self._tokenizer is not None
 
@@ -278,8 +274,8 @@ class GemmaLetterEngine:
         """Grow the prefix cache so a request with this many distinct prefixes fits.
 
         The LRU must hold every prefix a request will use, otherwise it evicts one
-        before that prefix is ever revisited and every call re-pays a full prefill —
-        silently costing the entire caching win. Growth is one-way (never shrinks)
+        before that prefix is revisited, and each call repeats a full prefill. This
+        removes the caching benefit. Growth is one-way (never shrinks)
         and clamped to ``prefix_cache_hard_cap``; if the request exceeds the cap we
         warn, because the caller's latency will be worse than they probably expect.
         """
@@ -347,8 +343,8 @@ class GemmaLetterEngine:
     ) -> tuple[dict[str, float], float] | None:
         """Letter logits for ``prefix + suffix``, reusing or populating the prefix cache.
 
-        A miss costs exactly one forward pass over the whole prompt — the same work
-        the uncached path does — and the prefix half of that pass's KV is kept for
+        A miss costs one forward pass over the whole prompt, matching the uncached
+        path. The prefix half of that pass's KV is kept for
         next time. A hit only prefills the tail.
         """
         import torch

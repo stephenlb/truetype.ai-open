@@ -20,22 +20,22 @@ judged *last*, so a prompt is::
     Text: <the caller's state>
     Answer:
 
-Putting the state last is what makes the engine's prefix KV cache pay off:
+Putting the state last makes the engine's prefix KV cache effective:
 everything above ``Text:`` depends only on the question, so it is byte-identical
 across calls and can be cached once. That took a warm Doom decision from 357ms to
-178ms (mean prompt tail 68 -> 20 tokens) with no accuracy change — 63/63 on the
+178ms (mean prompt tail 68 -> 20 tokens) with no accuracy change: 63/63 on the
 50-case suite plus the Doom probe and 8 held-out noul cases.
 
 Two example strategies, chosen by question type:
 
-* **Noul (Y/N):** a fixed bank of demonstrations that keep *their own* questions.
+- Noul (Y/N) uses a fixed bank of demonstrations with their own questions.
   The predicate in the options ("Yes, the text requests a refund.") carries the
-  task; the examples only teach the letter slot. Their questions deliberately
+  task; the examples teach the letter slot. Their questions
   differ from the target question, so their Y/N labels stay truthful rather than
   being relabelled under a question they were not written for. This lifted
   accuracy from 3/6 to 6/6 in tests/example_transfer.py.
 
-* **Choice / Score:** examples generated *from the caller's own criteria*. Each
+- Choice and Score use examples generated from the caller's criteria. Each
   option gets one synthetic demonstration mapping it to its letter, visited in a
   non-alphabetical order so the model cannot exploit A,B,C positional cues. This
   reached 10/10 on Choice and 11/12 on Score in tests/choice_score_bakeoff2.py and
@@ -85,7 +85,7 @@ def _noul_examples(question: Question, count: int) -> list[str]:
 def _criteria_roundtrip_examples(question: Question) -> list[str]:
     """One demonstration per option, built from the option's own description.
 
-    Ordering is deliberately non-alphabetical: options are visited in an order that
+    Options use a non-alphabetical order that
     interleaves the scale (low, high, middle, ...) so no positional shortcut exists.
     """
     header = _header(question)
@@ -133,11 +133,11 @@ def render_example_prefix(
 def render_target_block(question: Question, state: str) -> str:
     """The state-dependent tail, ending at the ``Answer:`` slot.
 
-    There is deliberately **no trailing space** after ``Answer:``. The letter tokens
+    There is no trailing space after ``Answer:``. The letter tokens
     the engine reads are space-prefixed (``"▁Y"``), which is how the examples above
     tokenize (``['Answer', ':', '▁Y']``). Adding a trailing space here would emit a
     standalone ``'▁'`` token and strand the space, so the model would want a bare
-    ``"Y"`` while the engine read ``"▁Y"`` — measured at 0.0000 probability mass on
+    ``"Y"`` while the engine read ``"▁Y"``. This measured 0.0000 probability mass on
     the letters being scored, versus 0.9871 without the space.
     """
     return f"Text: {state}\nAnswer:"
