@@ -25,7 +25,8 @@ levels, so 1.0 can mean "confidently level 1" or "split between 0 and 2"; read i
 
 ```bash
 # from the repo root
-python demo/doom_demo.py       # real Doom via ViZDoom (add --watch to see it)
+python demo/doom_demo.py       # real Doom, 3 arena scenarios (add --watch to see it)
+python doom/doom_full_game_demo.py  # real Doom, a full level (see below)
 python demo/game_demo.py       # text-adventure game
 python demo/web_nav_demo.py    # web-page navigation
 python demo/batch_demo.py      # 5 questions in 1 request
@@ -334,3 +335,114 @@ only cold call (it used to spike to ~1.3s).
   real-time Doom**. 40 decisions at 4 tics each covers ~4.6s of game time.
 - The state is a text reduction of the engine's labels, not pixels. The model reasons
   over a symbolic summary, not the frame.
+
+## Full-game Doom demo (`doom/doom_full_game_demo.py`)
+
+The arena demo answers one question with three actions. This one plays a **whole
+level** — Freedoom MAP01 by default, or any IWAD/map — and puts the model in charge
+of navigation as well as combat.
+
+```bash
+python doom/doom_full_game_demo.py                  # Freedoom 2 MAP01, 150 decisions
+python doom/doom_full_game_demo.py --watch          # ...and watch it play
+python doom/doom_full_game_demo.py --decisions 300
+python doom/doom_full_game_demo.py --map E1M1       # the cramped opening level
+python doom/doom_full_game_demo.py --iwad doom2.wad --map MAP01 --skill 2
+python doom/doom_full_game_demo.py --self-test      # check the questions, no engine
+```
+
+### What the model actually decides
+
+The phase is chosen deterministically from engine data, and the model answers only
+the ambiguous question for that phase:
+
+| Phase | When | Options |
+|---|---|---|
+| `combat` | monster labels on screen | shoot / advance / turn left / turn right / back away |
+| `stuck` | forward has failed several times | strafe left / strafe right / back away |
+| `navigate` | nothing to fight, not stuck | forward / turn left / turn right |
+
+Everything else is engine bookkeeping, because it is mechanical rather than
+ambiguous: a BFS route on the level's blocking lines picks the waypoint, `USE` rides
+along with forward so doors open on contact, the best loaded weapon is selected when
+the current one runs dry, and a short corrective turn (with the trigger held)
+squares the crosshair before a shot. Measured warm latency: combat ~175ms, stuck
+~160ms, navigate ~130ms — three cached prefixes.
+
+### Why MAP01 is the default
+
+E1M1 is cramped and door-heavy, and this agent is much worse at doors than at open
+rooms. Same code, same 300-decision budget, two maps:
+
+| Map | Kills | Items | Stuck decisions |
+|---|---|---|---|
+| `E1M1` (Freedoom 1) | 2 | 2 | ~7 |
+| `MAP01` (Freedoom 2) | 5 | 8 | ~3 |
+
+The model itself is identical; the level geometry is the variable. `--map E1M1`
+still works, and pairs with the Freedoom 1 IWAD automatically.
+
+### The biggest effectiveness change: real pathfinding
+
+The first version reacted to nearby geometry — "the widest gap is to the left,
+turn that way" — and re-decided the direction every tick. That shuffles at walls,
+because each tick's instruction is local and there is no memory of where the agent
+was going. The engine hands over every blocking line in the level, so the demo now
+builds a walkability grid (32-unit cells, 20-unit wall clearance) and runs BFS to
+the objective. The state reports the next waypoint on that route rather than the
+distant item, turning "walk around this wall" into a local "head that way" the
+model handles well. Grid build is 2-3ms per level; routing is under 1ms.
+
+This did not change latency (the prompt stayed a single line) but it did change how
+much of the map the agent crosses. On E1M1 it cut stuck decisions from ~33 to ~3;
+the earlier numbers were dominated by wall-shuffling, not by combat.
+
+### Turning points that were measured, not guessed
+
+1. **Bearing sign.** The engine's angle increases counterclockwise, so a bearing
+   computed as `object_angle - facing` is *positive to the player's left*. With the
+   sign inverted the model turned away from its target, which pushes the bearing
+   further out, and it orbited forever.
+2. **`TURN180` + forward, not + backward.** Turning 180 and walking *backward*
+   cancels itself out: the 180 fixes facing and then backward heads back into the
+   wall. Forward walks out.
+3. **`shoot` needs ~20 engine tics.** At 4 tics the model pressed fire and nothing
+   left the barrel; 16 tics is still the weapon raise. 20 is one shot, 32 is two.
+4. **Shoot at ≤350 units.** A 700-unit "shoot" rule produced 229 shots and zero
+   kills — a distant monster is a 3-pixel sprite and the pistol's spread misses it.
+5. **The weapon line biases the answer.** "The selected weapon is pistol with 30
+   shots." made the model answer `shoot` on a monster 1900 units away; the same
+   state without it answered `advance`. Removed.
+6. **The forward band and the state's words must agree.** `bearing_words` says
+   "slightly left/right" below 25 degrees and "far left/right" above it, matching
+   the 25-degree forward band in the criteria exactly. When the words said
+   "slightly right" at -22 degrees but the band was ±30, the model walked forward
+   into the wall beside a doorway for 55 decisions; with the bands aligned, the
+   same decision has confidence 0.6 instead of 0.06.
+7. **A blocked forward is not "stuck" — a door needs about four presses.** The
+   first failure used to switch to the stuck question, so the agent strafed away
+   from every closed door. Forward now retries several times before the state calls
+   the player stuck.
+8. **Do not cap movement macros at 4 tics.** `--tics` used to default to 4, which
+   truncated every calibrated macro (turns 14° instead of 17.5°, walks 20 units
+   instead of 40), so each decision changed the world less than the report implied.
+   The default is now the calibrated length.
+
+### A worked example of a prompt bug
+
+The first version described bearings in words only. The state said "dead ahead" for
+a monster 1900 units away, and the model answered `shoot` at confidence 0.52. The
+word and the 350-unit rule disagreed. Naming the band in the state — "close range,
+under 350 units" / "far away, over 350 units" — matched the criteria text and scored
+5/5. The self-test uses the demo's own state builders, so a wording change cannot
+silently keep passing against hand-copied strings.
+
+### Results (300-decision runs, headless, MAP01)
+
+| Seed | Kills | Items | Health | Deaths |
+|---|---|---|---|---|
+| default | 5 | 8 | 60 | 0 |
+| 3 | 5 | 8 | 68 | 0 |
+
+`--self-test` runs 22 synthetic states through the same prompt builders and fails
+loudly on a regression; all 22 pass.
