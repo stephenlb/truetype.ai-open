@@ -18,6 +18,16 @@ https://github.com/user-attachments/assets/c24ad3fd-044c-46b9-8862-46b70dd8e201
 
 https://github.com/user-attachments/assets/50a48f64-c483-4b1d-8956-7fb430837a60
 
+## Why did we rebuild Jev
+
+We wanted a faster self-hosted for [Blocks.ai](https://blocks.ai). 
+Blocks.ai agents are able to communicate with the world, 
+regardless of where they are hosted. Like your laptop.
+We noticed that LLMs often have high latency during the thinking process. 
+This was slow and error prone for agents. 
+If we could have a Jev-like system that can run locally, 
+we can improve this latency and accuracy for Blocks.ai agents.
+
 ## Requirements
 
 - Python 3.11 or newer
