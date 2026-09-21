@@ -14,6 +14,10 @@ are distinct. The code in `src/` does not call `generate()`, sample tokens, or
 run a decode loop. See `demo/README.md` for measurements and implementation
 notes.
 
+https://github.com/user-attachments/assets/db4a926a-df51-4901-9fb0-697e1ae2cd46
+
+https://github.com/user-attachments/assets/50a48f64-c483-4b1d-8956-7fb430837a60
+
 ## Requirements
 
 - Python 3.11 or newer
