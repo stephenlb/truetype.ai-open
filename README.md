@@ -189,6 +189,8 @@ to about 5.5 decisions/sec. Headless mode is the default.
 The full-game demo plays a whole level, with the model making both navigation
 and combat decisions:
 
+[Watch the full-game Doom demo](media/typesafe-replica-doom-game-only.mp4)
+
 ```bash
 python doom/doom_full_game_demo.py                  # Freedoom 2 MAP01, 150 decisions
 python doom/doom_full_game_demo.py --watch          # ...and watch it play
@@ -217,6 +219,8 @@ Flappy Bird demo removes that concession. The simulation runs at a fixed 30 fps
 and takes one decision every 4 frames, so each decision is worth 133ms of game
 time whether or not it has arrived, and the bird falls at the rate the model
 thinks.
+
+[Watch the Flappy Bird demo](media/jev-system-one-replica-flappy-bird.mp4)
 
 ```bash
 python flappy/flappy_bird_demo.py                  # 150 decisions, 1 episode
