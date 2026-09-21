@@ -26,6 +26,8 @@ https://github.com/user-attachments/assets/50a48f64-c483-4b1d-8956-7fb430837a60
 - Optional: ViZDoom (`pip install vizdoom`) for the Doom demos
 - Optional: pygame (`pip install pygame`) to watch the Flappy Bird demo in a window
 
+<img width="1536" height="1024" alt="truetype-jev-replicat-architecture" src="https://github.com/user-attachments/assets/3d2b9dfb-beca-4e1d-aba0-98f4a517e7e8" />
+
 ## Install
 
 ```bash
