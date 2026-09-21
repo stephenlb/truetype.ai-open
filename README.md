@@ -18,15 +18,14 @@ https://github.com/user-attachments/assets/c24ad3fd-044c-46b9-8862-46b70dd8e201
 
 https://github.com/user-attachments/assets/50a48f64-c483-4b1d-8956-7fb430837a60
 
-## Why did we rebuild Jev
+## Why we rebuilt Jev
 
-We wanted a faster self-hosted for [Blocks.ai](https://blocks.ai). 
-Blocks.ai agents are able to communicate with the world, 
-regardless of where they are hosted. Like your laptop.
-We noticed that LLMs often have high latency during the thinking process. 
-This was slow and error prone for agents. 
-If we could have a Jev-like system that can run locally, 
-we can improve this latency and accuracy for Blocks.ai agents.
+We wanted a fast, self-hosted decision model for
+[Blocks.ai](https://blocks.ai). Blocks.ai agents interact with external systems
+from wherever they run, including a laptop, but general-purpose LLM reasoning
+adds latency and gives agents more room to make mistakes. A local Jev-style
+system gives them faster, more reliable decisions without sending every request
+to a hosted model.
 
 ## Requirements
 
@@ -125,10 +124,10 @@ Response:
 ```
 
 A `score` answer is the expected value `sum(i * p_i)` across the ordinal levels.
-For example, 1.82 reflects probability split between levels 1 and 2. Use
+For example, 1.82 reflects a probability split between levels 1 and 2. Use
 `confidence` to distinguish a concentrated result from a split distribution. A
-`choice` answer is the argmax over the criteria
-letters. A `noul` answer is the probability of "yes."
+`choice` answer is the argmax over the criteria letters. A `noul` answer is the
+probability of "yes."
 
 ## Tests
 
@@ -202,8 +201,8 @@ then draws every skipped tic. Rendering happens inside `make_action`, outside
 the timed decision. Per-decision latency stays the same, while throughput drops
 to about 5.5 decisions/sec. Headless mode is the default.
 
-The full-game demo plays a whole level, with the model making both navigation
-and combat decisions:
+In the full-game demo, the model handles navigation and combat for an entire
+level:
 
 [Watch the full-game Doom demo](media/typesafe-replica-doom-game-only.mp4)
 
@@ -266,17 +265,17 @@ Crashes are the metric, not pipes. A surviving bird passes one pipe every 15
 decisions whatever it does well, so the pipe count only measures how long the run
 was; 16 per episode is what 250 decisions buys.
 
-The demo projects the bird's coasting path through the whole pipe crossing and
-asks the model one question about the outcome: whether coasting leaves the bird
-too low, lined up, or too high. `--self-test` sends 14 synthetic states through
-the same prompt builders (14/14) and `--baseline` plays the rule the criteria
-describe, which clears 39 pipes in 600 decisions on every seed, so a crash is
-evidence about the decision rather than the tuning.
+The demo projects the bird's coasting path through the whole pipe crossing. It
+then asks whether the bird will end up too low, lined up, or too high.
+`--self-test` runs 14 synthetic states through the same prompt builders.
+`--baseline` follows the rule described by the criteria and clears 39 pipes in
+600 decisions on every seed. This separates model errors from problems in the
+game tuning.
 
-`--watch` needs `pip install pygame`; without it the demo falls back to `--ascii`.
-The module docstring records the two wording measurements behind the prompts: the
-A-position bias that cost every `coast` case until the no-op action was listed
-first, and the offsets that the model read instead of the verdict.
+`--watch` needs `pip install pygame`; without it, the demo falls back to
+`--ascii`. The module docstring records two prompt findings. An A-position bias
+caused every `coast` case to fail until the no-op action was listed first, and
+the model initially read the offsets instead of the verdict.
 
 ## Docker
 
@@ -308,26 +307,3 @@ docker run --rm --gpus all -p 8000:8000 \
 The image binds `0.0.0.0` inside the container. The 12B model needs about 24GB of
 RAM in CPU mode. Mounting the Hugging Face cache keeps the 22GB model download
 out of the image.
-The API has no authentication, so keep the published port on localhost or behind a
-proxy that handles access control.
-
-## Layout
-
-```
-src/truetype/       the replica library and HTTP API
-  engine.py         model load, letter readout, prefix KV cache
-  letters.py        A-Z logit extraction and softmax
-  questions.py      noul / choice / score primitives
-  render.py         prompt construction (prefix and state tail)
-  service.py        request orchestration, sequential cached scoring
-  api.py            FastAPI app and entry point
-demo/               five demos (see demo/README.md for measurements)
-doom/               full-level Doom demo
-flappy/             Flappy Bird demo, played against a running game clock
-tests/              the 52-test verification suite
-```
-
-`demo/README.md` contains the measurements behind the cache design and Doom
-prompt changes. It covers an undersized cache that erased the speedup and a
-prompt bug that left the scored letters with 0.0000 probability mass while all
-50 accuracy tests still passed.
