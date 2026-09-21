@@ -4,6 +4,8 @@ A local replica of the Jev TypeSafe AI System One API, tuned to match its latenc
 while reading letter logits from Gemma 4 12B. `POST /v1/systemone` accepts and
 returns the original formats for all three supported question types.
 
+![Jev Replica System One Model](media/jev-replica-system-one-model.jpg)
+
 Each answer uses one token. The engine runs one `forward()` pass, reads
 next-token logits at the answer position, keeps the 26 A-Z token IDs, and
 applies a temperature-0.7 softmax to the letters allowed by the question. At
@@ -111,32 +113,6 @@ For example, 1.82 reflects probability split between levels 1 and 2. Use
 `confidence` to distinguish a concentrated result from a split distribution. A
 `choice` answer is the argmax over the criteria
 letters. A `noul` answer is the probability of "yes."
-
-### Configuration
-
-All variables are read at startup.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `HOST` | `127.0.0.1` | bind address |
-| `PORT` | `8000` | bind port |
-| `TYPESAFE_REPLICA_MODEL_ID` | `google/gemma-4-12B` | Hugging Face model id |
-| `TYPESAFE_REPLICA_DEVICE` | `auto` | `cuda`, `mps`, `cpu`, or `auto` |
-| `TYPESAFE_REPLICA_DTYPE` | `auto` | `bfloat16`, `float16`, `float32`, or `auto` (float32 on CPU, bfloat16 elsewhere) |
-| `TYPESAFE_REPLICA_TOP_K` | `5` | ranked letters reported per question |
-| `TYPESAFE_REPLICA_PREFIX_CACHE` | `1` | cache the static few-shot prefix KV (~5x faster repeats) |
-| `TYPESAFE_REPLICA_MAX_CACHED_PREFIXES` | `16` | LRU size; must cover distinct questions per request |
-| `TYPESAFE_REPLICA_PREFIX_CACHE_HARD_CAP` | `64` | ceiling for per-request cache growth |
-| `TYPESAFE_REPLICA_WARM_QUESTIONS` | unset | JSON object of question specs to prefill at startup |
-
-Each cached prefix adds roughly 127MB of KV data on top of the weights. On
-memory-constrained machines, lower
-`TYPESAFE_REPLICA_PREFIX_CACHE_HARD_CAP` or set
-`TYPESAFE_REPLICA_PREFIX_CACHE=0`.
-
-Warming is off by default. It helps when requests reuse a prefix: a Doom run
-uses one prefix about 40 times, while the text-adventure demo supplies new
-criteria at each step.
 
 ## Tests
 
