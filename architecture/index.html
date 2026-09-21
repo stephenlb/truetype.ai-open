@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>truetype.ai replica — end-to-end architecture</title>
+<meta name="description" content="Single-file, pure-CSS architecture diagram of the truetype.ai TypeSafe System One replica: FastAPI edge to Gemma letter logits.">
+<style>
+  :root{
+    --bg:#0a0d13;
+    --panel:#101725;
+    --panel2:#0c121d;
+    --ink:#e8eefc;
+    --ink-dim:#c3cfdf;
+    --muted:#8ea1bf;
+    --faint:#5f7391;
+    --line:#1f2c42;
+    --line2:#2b3c59;
+    --cyan:#4cc9f0;
+    --violet:#a78bfa;
+    --amber:#fbbf24;
+    --green:#34d399;
+    --rose:#fb7185;
+    --blue:#60a5fa;
+    --teal:#2dd4bf;
+    --radius:14px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.6;
+  }
+  body::before{
+    content:"";
+    position:fixed;
+    inset:0;
+    pointer-events:none;
+    background-image:
+      linear-gradient(to right, rgba(76,201,240,.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(76,201,240,.045) 1px, transparent 1px);
+    background-size:52px 52px;
+    mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 78%);
+    -webkit-mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 78%);
+  }
+
+  .wrap{max-width:1160px;margin:0 auto;padding:56px 22px 90px;position:relative}
+
+  /* ---------- header ---------- */
+  header.masthead{margin-bottom:40px}
+  .eyebrow{
+    font:600 11px/1 var(--mono);
+    letter-spacing:.24em;
+    text-transform:uppercase;
+    color:var(--cyan);
+    display:flex;align-items:center;gap:10px;
+  }
+  .eyebrow::after{content:"";height:1px;flex:1;background:linear-gradient(90deg,var(--line2),transparent)}
+  h1{
+    font-size:clamp(28px,4.4vw,46px);
+    line-height:1.08;
+    letter-spacing:-.022em;
+    margin:16px 0 12px;
+    font-weight:650;
+  }
+  h1 .thin{color:var(--muted);font-weight:450}
+  .lede{max-width:76ch;color:var(--ink-dim);font-size:16px;margin:0}
+  .lede code{font-family:var(--mono);font-size:.88em;color:var(--cyan)}
+
+  .pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+  .pill{
+    font:500 11.5px/1 var(--mono);
+    padding:7px 11px;
+    border-radius:999px;
+    border:1px solid var(--line2);
+    background:var(--panel2);
+    color:var(--ink-dim);
+    white-space:nowrap;
+  }
+  .pill b{color:var(--cyan);font-weight:600}
+  .pill--rose b{color:var(--rose)}
+  .pill--amber b{color:var(--amber)}
+  .pill--green b{color:var(--green)}
+
+  /* ---------- section headings ---------- */
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin:52px 0 18px}
+  .sec-head h2{
+    font-size:13px;
+    font-family:var(--mono);
+    font-weight:600;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--ink);
+    margin:0;
+  }
+  .sec-head::after{content:"";height:1px;flex:1;background:var(--line)}
+  .sec-head .hint{font:11px var(--mono);color:var(--faint);letter-spacing:.06em}
+
+  /* ---------- layer stack ---------- */
+  .stack{display:flex;flex-direction:column}
+
+  .layer{
+    --accent:var(--slate);
+    display:grid;
+    grid-template-columns:216px minmax(0,1fr);
+    gap:0;
+    border:1px solid var(--line);
+    border-left:3px solid var(--accent);
+    border-radius:var(--radius);
+    background:var(--panel);
+    box-shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 14px 34px -30px rgba(0,0,0,.9);
+    overflow:hidden;
+  }
+  .layer--client{--accent:var(--cyan)}
+  .layer--api{--accent:var(--violet)}
+  .layer--service{--accent:var(--amber)}
+  .layer--prompt{--accent:var(--green)}
+  .layer--engine{--accent:var(--rose)}
+  .layer--model{--accent:var(--blue)}
+  .layer--readout{--accent:var(--teal)}
+
+  .layer__side{
+    padding:16px 16px 16px 18px;
+    border-right:1px solid var(--line);
+    background:linear-gradient(180deg, rgba(255,255,255,.022), transparent);
+  }
+  .layer__idx{
+    display:inline-block;
+    font:600 10.5px/1 var(--mono);
+    letter-spacing:.1em;
+    color:var(--accent);
+    border:1px solid var(--accent);
+    border-radius:5px;
+    padding:4px 6px;
+    opacity:.9;
+  }
+  .layer__name{margin:11px 0 7px;font-size:15.5px;font-weight:640;letter-spacing:-.01em}
+  .layer__file{font:11px var(--mono);color:var(--accent);display:block;word-break:break-all}
+  .layer__role{margin:9px 0 0;font-size:12.5px;line-height:1.5;color:var(--faint)}
+
+  .layer__body{padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:10px}
+  .card{
+    background:var(--panel2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:11px 12px 12px;
+    min-width:0;
+  }
+  .card h3{
+    margin:0 0 7px;
+    font:600 12px/1.35 var(--mono);
+    color:var(--accent);
+    letter-spacing:.012em;
+  }
+  .card p{margin:0;font-size:12.5px;line-height:1.55;color:var(--muted)}
+  .card p + p{margin-top:6px}
+  .card .k{color:var(--ink-dim);font-family:var(--mono);font-size:.94em}
+  .card .v{color:var(--accent);font-family:var(--mono);font-size:.94em}
+  .card .warn{color:var(--rose)}
+
+  .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+  .tag{
+    font:500 10.5px/1 var(--mono);
+    padding:3px 7px;
+    border-radius:999px;
+    border:1px solid var(--line2);
+    background:#0a101a;
+    color:var(--muted);
+    white-space:nowrap;
+  }
+
+  /* ---------- connectors ---------- */
+  .connector{display:flex;align-items:center;justify-content:center;gap:14px;padding:11px 0}
+  .connector__label{
+    font:11px var(--mono);
+    letter-spacing:.05em;
+    color:var(--faint);
+    text-align:right;
+  }
+  .connector__arrow{
+    --accent:var(--line2);
+    position:relative;
+    width:2px;
+    height:34px;
+    background:linear-gradient(180deg, rgba(255,255,255,.06), var(--accent));
+    border-radius:2px;
+  }
+  .connector__arrow::after{
+    content:"";
+    position:absolute;
+    left:50%;
+    bottom:-2px;
+    transform:translateX(-50%);
+    border-left:6px solid transparent;
+    border-right:6px solid transparent;
+    border-top:9px solid var(--accent);
+  }
+  .connector--api .connector__arrow{--accent:var(--violet)}
+  .connector--service .connector__arrow{--accent:var(--amber)}
+  .connector--prompt .connector__arrow{--accent:var(--green)}
+  .connector--engine .connector__arrow{--accent:var(--rose)}
+  .connector--model .connector__arrow{--accent:var(--blue)}
+  .connector--readout .connector__arrow{--accent:var(--teal)}
+  .connector--return .connector__arrow{
+    --accent:var(--cyan);
+    transform:rotate(180deg);
+  }
+
+  /* ---------- panels ---------- */
+  .panel{
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    background:var(--panel);
+    padding:18px;
+  }
+  .panel + .panel{margin-top:16px}
+  .panel h3{
+    margin:0 0 4px;
+    font:600 12.5px var(--mono);
+    letter-spacing:.05em;
+    color:var(--ink);
+  }
+  .panel .sub{margin:0 0 16px;font-size:12.5px;color:var(--faint)}
+
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+
+  /* ---------- prompt anatomy bars ---------- */
+  .bars{display:flex;flex-direction:column;gap:16px}
+  .bar-row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:14px;align-items:center}
+  .bar-row__label{font:600 11px/1.4 var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .bar{
+    display:flex;
+    height:44px;
+    border:1px solid var(--line);
+    border-radius:9px;
+    overflow:hidden;
+    background:#0a101a;
+  }
+  .seg{
+    display:flex;align-items:center;justify-content:center;
+    font:600 10.5px var(--mono);
+    letter-spacing:.04em;
+    padding:0 8px;
+    white-space:nowrap;
+    overflow:hidden;
+    min-width:38px;
+  }
+  .seg--pre{flex:369;background:linear-gradient(180deg,#17263d,#131f33);color:#9cc8f5}
+  .seg--miss{flex:68;background:linear-gradient(180deg,#3a1d28,#2b1620);color:#f5a3af}
+  .seg--warm{flex:20;background:linear-gradient(180deg,#153229,#102620);color:#86e8bf}
+  .bar-note{
+    display:grid;grid-template-columns:92px minmax(0,1fr);gap:14px;
+    font:11px var(--mono);color:var(--faint);
+  }
+  .bar-note span:nth-child(2){color:var(--muted)}
+
+  /* ---------- cache branch ---------- */
+  .branch{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .branch__col{
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:14px 15px 15px;
+    background:var(--panel2);
+  }
+  .branch__col--hit{border-color:#1f4a3c}
+  .branch__col--miss{border-color:#4a3520}
+  .branch__col h4{
+    margin:0 0 10px;
+    font:600 12px var(--mono);
+    letter-spacing:.06em;
+    display:flex;align-items:center;gap:8px;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .dot--hit{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,.14)}
+  .dot--miss{background:var(--amber);box-shadow:0 0 0 3px rgba(251,191,36,.14)}
+  .branch__col--hit h4{color:var(--green)}
+  .branch__col--miss h4{color:var(--amber)}
+  ol.steps{margin:0;padding:0;list-style:none;counter-reset:s}
+  ol.steps li{
+    counter-increment:s;
+    position:relative;
+    padding:0 0 11px 26px;
+    font-size:12.5px;
+    line-height:1.5;
+    color:var(--muted);
+  }
+  ol.steps li:last-child{padding-bottom:0}
+  ol.steps li::before{
+    content:counter(s);
+    position:absolute;left:0;top:1px;
+    width:17px;height:17px;border-radius:5px;
+    border:1px solid var(--line2);
+    background:#0a101a;
+    color:var(--ink-dim);
+    font:600 10px var(--mono);
+    display:flex;align-items:center;justify-content:center;
+  }
+  ol.steps code{font:11.5px var(--mono);color:var(--ink-dim)}
+
+  /* ---------- chain ---------- */
+  .chain{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .chain__item{
+    font:11.5px var(--mono);
+    padding:7px 11px;
+    border-radius:8px;
+    border:1px solid var(--line2);
+    background:var(--panel2);
+    color:var(--ink-dim);
+    white-space:nowrap;
+  }
+  .chain__item b{color:var(--teal);font-weight:600}
+  .chain__arrow{color:var(--faint);font-family:var(--mono);font-size:13px}
+
+  /* ---------- metrics table ---------- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  caption{caption-side:bottom;text-align:left;padding-top:10px;font:11px var(--mono);color:var(--faint)}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  thead th{
+    font:600 10.5px var(--mono);
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--faint);
+    border-bottom-color:var(--line2);
+  }
+  tbody tr:last-child td{border-bottom:0}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+  td:nth-child(2){color:var(--muted)}
+  td .good{color:var(--green)}
+  td .bad{color:var(--rose)}
+
+  /* ---------- not-in-path ---------- */
+  .nope{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+  .nope div{
+    border:1px dashed var(--line2);
+    border-radius:10px;
+    padding:10px 12px;
+    font:11.5px/1.5 var(--mono);
+    color:var(--muted);
+  }
+  .nope div b{display:block;color:var(--rose);font-weight:600;margin-bottom:3px}
+
+  footer{
+    margin-top:56px;
+    padding-top:18px;
+    border-top:1px solid var(--line);
+    font:11.5px/1.7 var(--mono);
+    color:var(--faint);
+  }
+  footer code{color:var(--muted)}
+
+  @media (max-width:880px){
+    .layer{grid-template-columns:1fr}
+    .layer__side{border-right:0;border-bottom:1px solid var(--line)}
+    .duo,.branch{grid-template-columns:1fr}
+    .bar-row,.bar-note{grid-template-columns:1fr;gap:6px}
+    .connector__label{text-align:center}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .layer{transition:border-color .18s ease, transform .18s ease}
+    .layer:hover{border-color:var(--line2)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">truetype.ai replica · system one · architecture</div>
+    <h1>One forward pass, one token,<br><span class="thin">26 letters of readout.</span></h1>
+    <p class="lede">
+      A TypeSafe-compatible <code>POST /v1/systemone</code> service backed by the base
+      <code>google/gemma-4-12B</code> checkpoint. No chat template, no sampling, no decode loop:
+      the engine reads next-token logits at the <code>Answer:</code> position and turns the
+      legal letters into a typed answer.
+    </p>
+    <div class="pills">
+      <span class="pill"><b>MAX_NEW_TOKENS=1</b> · one forward per prompt</span>
+      <span class="pill pill--rose"><b>T=0.7</b> softmax over legal letters</span>
+      <span class="pill pill--amber"><b>~24GB</b> weights · bf16 off cpu</span>
+      <span class="pill pill--green"><b>~133ms</b> p50 warm decision</span>
+      <span class="pill"><b>127MB</b> KV per cached prefix</span>
+    </div>
+  </header>
+
+  <main>
+
+    <div class="sec-head">
+      <h2>Request path</h2>
+      <span class="hint">top → bottom · each layer is a module</span>
+    </div>
+
+    <div class="stack">
+
+      <!-- ============ 00 CALLER ============ -->
+      <article class="layer layer--client">
+        <div class="layer__side">
+          <span class="layer__idx">00</span>
+          <h2 class="layer__name">Caller</h2>
+          <code class="layer__file">curl · demo/*.py · doom/</code>
+          <p class="layer__role">Anything that speaks the System One request shape.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>request body</h3>
+              <p><span class="k">state</span> is a string, dict, or list. <span class="k">questions</span>
+              maps an id to <span class="k">{type, instructions, criteria}</span>.
+              <span class="k">model</span> defaults to <span class="v">gemma-4-12b</span>.</p>
+            </div>
+            <div class="card">
+              <h3>consumers</h3>
+              <p>Doom agent, text adventure, web-nav flow, batch demo, and any TypeSafe client
+              pointed at this host.</p>
+              <div class="tags">
+                <span class="tag">doom_demo.py</span>
+                <span class="tag">game_demo.py</span>
+                <span class="tag">web_nav_demo.py</span>
+                <span class="tag">batch_demo.py</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>health probe</h3>
+              <p><span class="k">GET /health</span> returns load state plus live prefix-cache
+              counters: hits, misses, evictions, entries, capacity, hard cap.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--api">
+        <span class="connector__label">http json ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">model still loading → 503</span>
+      </div>
+
+      <!-- ============ 01 API ============ -->
+      <article class="layer layer--api">
+        <div class="layer__side">
+          <span class="layer__idx">01</span>
+          <h2 class="layer__name">HTTP edge</h2>
+          <code class="layer__file">src/truetype/api.py</code>
+          <p class="layer__role">Validate, authorize, expose, and hold the one engine.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>lifespan startup</h3>
+              <p>Build <span class="k">EngineConfig</span> from env, construct
+              <span class="k">GemmaLetterEngine</span>, call <span class="k">engine.load()</span>
+              once (~5s), wrap in <span class="k">TypeSafeReplica</span>, then optionally
+              <span class="k">service.warm()</span> the questions in
+              <span class="k">TYPESAFE_REPLICA_WARM_QUESTIONS</span>.</p>
+              <div class="tags">
+                <span class="tag">DEVICE=auto</span>
+                <span class="tag">DTYPE=auto</span>
+                <span class="tag">TOP_K=5</span>
+                <span class="tag">PREFIX_CACHE=1</span>
+                <span class="tag">MAX_CACHED_PREFIXES=16</span>
+                <span class="tag">HARD_CAP=64</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>pydantic contract</h3>
+              <p><span class="k">SystemOneRequest</span> rejects <span class="k">temperature &lt;= 0</span>
+              at parse time. Empty <span class="k">questions</span> → 422, auth failure → 401,
+              service not yet loaded → 503, <span class="k">ValueError</span> from a bad spec → 422.</p>
+            </div>
+            <div class="card">
+              <h3>process-wide state</h3>
+              <p><span class="k">_state["service"]</span> holds the single engine so weights load
+              once per process. The optional bearer key is read from the environment at import.</p>
+              <div class="tags">
+                <span class="tag">TYPESAFE_REPLICA_API_KEY</span>
+                <span class="tag">HOST</span>
+                <span class="tag">PORT</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--service">
+        <span class="connector__label">state + question specs ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">SystemOneResponse ↑</span>
+      </div>
+
+      <!-- ============ 02 SERVICE ============ -->
+      <article class="layer layer--service">
+        <div class="layer__side">
+          <span class="layer__idx">02</span>
+          <h2 class="layer__name">Orchestration</h2>
+          <code class="layer__file">src/truetype/service.py</code>
+          <p class="layer__role">Decide what to render, in what order, and how to score it back.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>system_one()</h3>
+              <p>Non-string state is serialized with <span class="k">json.dumps(indent=2)</span>.
+              Each spec becomes a typed <span class="k">Question</span>, then prompts are rendered
+              and scored.</p>
+              <div class="tags">
+                <span class="tag">build_question()</span>
+                <span class="tag">render_batch()</span>
+                <span class="tag">score_question()</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>prefix-cache branch</h3>
+              <p>Cache on: <span class="k">ensure_prefix_capacity(len(questions))</span>, then score
+              one question at a time against its own prefix — sequential cached calls beat one
+              uncached batch. Cache off: a single <span class="k">score_batch()</span> over all prompts.</p>
+            </div>
+            <div class="card">
+              <h3>scoring over full readout</h3>
+              <p><span class="k">score_question()</span> gets the full 26-letter logit dict, never the
+              truncated top-k, so a question with more options than <span class="k">top_k</span> is not
+              cut off. Renormalization happens over the question's own legal letters.</p>
+            </div>
+            <div class="card">
+              <h3>usage accounting</h3>
+              <p><span class="k">input_tokens = chars // 4</span> across rendered prompts;
+              <span class="k">output_tokens = number of questions</span> — one token each, by
+              construction.</p>
+            </div>
+            <div class="card">
+              <h3>warm()</h3>
+              <p>Prefills the prefix of known questions before a timed loop. Does not beat a cold
+              miss; it just moves the prefill outside the caller's clock. A Doom run reuses one
+              prefix ~40 times.</p>
+            </div>
+            <div class="card">
+              <h3>debug payload</h3>
+              <p><span class="k">include_debug</span> returns the exact prompt text, raw letter
+              logits, and the ranked top-k letters per question.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--prompt">
+        <span class="connector__label">prefix + state tail ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">26 letter logits ↑</span>
+      </div>
+
+      <!-- ============ 03 PROMPT ============ -->
+      <article class="layer layer--prompt">
+        <div class="layer__side">
+          <span class="layer__idx">03</span>
+          <h2 class="layer__name">Prompt &amp; primitives</h2>
+          <code class="layer__file">src/truetype/render.py<br>src/truetype/questions.py</code>
+          <p class="layer__role">Turn typed questions into base-completion text with a cacheable head.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>block layout</h3>
+              <p>Each example is <span class="k">Choices: … Question: … Text: … Answer: X</span>.
+              The answer-relevant scaffolding sits first, the judged text last, so the head is
+              byte-identical across calls for the same question.</p>
+            </div>
+            <div class="card">
+              <h3>noul examples</h3>
+              <p>A fixed bank of 6 demonstrations with predicates that differ from the target
+              question. They teach the letter slot; the target's own options carry the task, so
+              example labels stay truthful instead of being relabelled.</p>
+              <div class="tags">
+                <span class="tag">GENERIC_EXAMPLES</span>
+                <span class="tag">DEFAULT_EXAMPLE_COUNT=6</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>choice / score examples</h3>
+              <p>One synthetic roundtrip per option, generated from the caller's criteria.
+              Options are visited <span class="k">low, high, then ascending</span> so no A,B,C
+              positional shortcut exists.</p>
+              <div class="tags">
+                <span class="tag">_interleaved_order()</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>the Answer: slot</h3>
+              <p>No trailing space after <span class="k">Answer:</span>. The natural continuation is
+              the space-prefixed letter token <span class="k">"▁Y"</span>, matching the examples.
+              A trailing space stranded the space and dropped scored-letter mass to
+              <span class="warn">0.0000</span> (vs 0.9871).</p>
+            </div>
+            <div class="card">
+              <h3>three primitives</h3>
+              <p><span class="k">noul</span> → Y/N (max 2 options). <span class="k">choice</span> →
+              named criteria map, one letter each, max 26. <span class="k">score</span> → ordered
+              levels, one letter each, max 26.</p>
+            </div>
+            <div class="card">
+              <h3>instruction rewriting</h3>
+              <p><span class="k">_predicate_forms()</span> turns "Does the text request a refund?"
+              into a Yes sentence and a No sentence used as the option text.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--engine">
+        <span class="connector__label">prompt strings ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">LetterReadout ↑</span>
+      </div>
+
+      <!-- ============ 04 ENGINE ============ -->
+      <article class="layer layer--engine">
+        <div class="layer__side">
+          <span class="layer__idx">04</span>
+          <h2 class="layer__name">Letter engine</h2>
+          <code class="layer__file">src/truetype/engine.py</code>
+          <p class="layer__role">Lazy load, one forward, cache the prefix KV.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>load() — <span class="v">engine.py:110</span></h3>
+              <p>Double-checked under a <span class="k">Lock</span>, idempotent. Device auto:
+              cuda → mps → cpu. Dtype auto: <span class="k">float32</span> on cpu,
+              <span class="k">bfloat16</span> elsewhere. Left-padding, <span class="k">eval()</span>,
+              low-cpu-memory load.</p>
+            </div>
+            <div class="card">
+              <h3>letter token map — <span class="v">:160</span></h3>
+              <p>Tries <span class="k">" A"</span> then bare <span class="k">"A"</span>. All 26 must
+              be single tokens <em>and</em> distinct, from one variant; mixing shapes makes logits
+              incomparable. No variant → the engine refuses to run.</p>
+              <div class="tags">
+                <span class="tag">letters_with_leading_space=true</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>score_batch() — <span class="v">:210</span></h3>
+              <p>Splits prompts into chunks of <span class="k">max_batch_size=16</span>, tokenizes with
+              padding, and runs one <span class="k">forward</span> per chunk:
+              <span class="k">logits_to_keep=1</span>, <span class="k">use_cache=False</span>,
+              then <span class="k">logits[:, -1, :].float()</span>.</p>
+            </div>
+            <div class="card">
+              <h3>score_with_prefix() — <span class="v">:297</span></h3>
+              <p>Per suffix: reuse the prefix KV if it is there, otherwise fall back to a full
+              uncached pass. Disabled cache or empty prefix routes straight to
+              <span class="k">score_batch()</span>.</p>
+            </div>
+            <div class="card">
+              <h3>ensure_prefix_capacity() — <span class="v">:273</span></h3>
+              <p>Grows one-way to cover every distinct prefix in the request, clamped to the hard
+              cap. An undersized LRU evicts before a prefix is revisited and every call repeats
+              prefill: <span class="warn">8051ms @ cap 8</span> vs <span class="v">1771ms @ cap 10</span>
+              for 10 questions.</p>
+            </div>
+            <div class="card">
+              <h3>counters</h3>
+              <p><span class="k">prefix_cache_hits</span>, <span class="k">misses</span>,
+              <span class="k">evictions</span>, exposed via <span class="k">/health</span>. The cache is
+              an <span class="k">OrderedDict</span>; <span class="k">move_to_end</span> on hit,
+              <span class="k">popitem(last=False)</span> to evict.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--model">
+        <span class="connector__label">input_ids + past_key_values ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">logits [batch, vocab] ↑</span>
+      </div>
+
+      <!-- ============ 05 MODEL ============ -->
+      <article class="layer layer--model">
+        <div class="layer__side">
+          <span class="layer__idx">05</span>
+          <h2 class="layer__name">Weights</h2>
+          <code class="layer__file">google/gemma-4-12B</code>
+          <p class="layer__role">Base checkpoint. The letter after the prompt is the answer.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>base, not chat</h3>
+              <p>No chat template and no multi-token preamble, so nothing stands between the prompt
+              and the first predicted token. One <span class="k">forward()</span> yields the whole
+              answer.</p>
+            </div>
+            <div class="card">
+              <h3>footprint</h3>
+              <p>~22GB download cached under <span class="k">~/.cache/huggingface</span>, ~24GB
+              resident in bf16, plus ~127MB of KV per cached 369-token prefix. The default cap of 64
+              entries can reach ~8GB of KV.</p>
+            </div>
+            <div class="card">
+              <h3>KV reuse shape</h3>
+              <p>A cached prefix is the prefix slice of one real forward pass, cropped back to
+              prefix length with <span class="k">cache.crop(-tail_len)</span> after each use. Nothing
+              is re-tokenized or replayed for the head.</p>
+            </div>
+            <div class="card">
+              <h3>batch policy</h3>
+              <p>With caching on, the service scores questions sequentially instead of batching: on
+              this hardware the prefill saved per question outweighs batch throughput.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--readout">
+        <span class="connector__label">next-token logits ↓</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">A–Z logits + mass ↑</span>
+      </div>
+
+      <!-- ============ 06 READOUT ============ -->
+      <article class="layer layer--readout">
+        <div class="layer__side">
+          <span class="layer__idx">06</span>
+          <h2 class="layer__name">Letter readout</h2>
+          <code class="layer__file">src/truetype/letters.py</code>
+          <p class="layer__role">Gather the 26 letters, check their mass, softmax the legal ones.</p>
+        </div>
+        <div class="layer__body">
+          <div class="cards">
+            <div class="card">
+              <h3>batch_letter_logits() — <span class="v">:118</span></h3>
+              <p>Indexes the 26 A–Z token ids out of <span class="k">[batch, vocab]</span> into one
+              logit dict per row. This is the model's raw vote, before any renormalization.</p>
+            </div>
+            <div class="card">
+              <h3>batch_letter_mass() — <span class="v">:134</span></h3>
+              <p>Fraction of the <em>full-vocabulary</em> probability sitting on A–Z, via
+              <span class="k">exp(logsumexp(letters) − logsumexp(vocab))</span>. If it approaches
+              zero, the argmax is noise in the distribution tail.</p>
+            </div>
+            <div class="card">
+              <h3>distribution_from_letter_logits() — <span class="v">:85</span></h3>
+              <p>Rank, keep top-k (clamped to 1..26), softmax at temperature over just those k, so
+              reported probabilities sum to 1 across surfaced options.</p>
+              <div class="tags">
+                <span class="tag">temperature=0.7</span>
+                <span class="tag">top_k=5</span>
+                <span class="tag">LETTERS=A..Z</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>failure modes</h3>
+              <p><span class="k">LetterLogitError</span> on non-letter keys, an empty readout, or a
+              non-finite softmax denominator. Low temperature cannot change the argmax — it only
+              sharpens score and confidence.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="connector connector--return">
+        <span class="connector__label">typed answers ↑</span>
+        <span class="connector__arrow"></span>
+        <span class="connector__label">renormalized per question</span>
+      </div>
+
+      <article class="layer layer--client">
+        <div class="layer__side">
+          <span class="layer__idx">↩</span>
+          <h2 class="layer__name">Return path</h2>
+          <code class="layer__file">200 OK · JSON</code>
+          <p class="layer__role">Raw letters become typed answers on the way back up.</p>
+        </div>
+        <div class="layer__body">
+          <div class="chain">
+            <span class="chain__item"><b>26 logits</b></span>
+            <span class="chain__arrow">→</span>
+            <span class="chain__item">softmax over legal letters</span>
+            <span class="chain__arrow">→</span>
+            <span class="chain__item">choice argmax + confidence</span>
+            <span class="chain__arrow">→</span>
+            <span class="chain__item">noul = P(yes)</span>
+            <span class="chain__arrow">→</span>
+            <span class="chain__item">score = Σ i·p<sub>i</sub></span>
+            <span class="chain__arrow">→</span>
+            <span class="chain__item"><b>answers[qid]</b></span>
+          </div>
+          <div class="cards" style="margin-top:10px">
+            <div class="card">
+              <h3>noul</h3>
+              <p>Probability of "yes" over the two legal letters, returned as
+              <span class="k">noul</span>.</p>
+            </div>
+            <div class="card">
+              <h3>choice</h3>
+              <p>Argmax label plus the full probability map and an entropy confidence,
+              <span class="k">1 − H / log n</span>: 1.0 when all mass sits on one option.</p>
+            </div>
+            <div class="card">
+              <h3>score</h3>
+              <p>Expected level <span class="k">Σ i·p<sub>i</sub></span> over the ordered criteria,
+              with the same confidence. Read the score together with confidence.</p>
+            </div>
+            <div class="card">
+              <h3>envelope</h3>
+              <p><span class="k">{model, answers, usage}</span> — the shape TypeSafe documents, so a
+              client can repoint its base URL without touching its parsing.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+    </div>
+
+    <div class="sec-head">
+      <h2>What the cache holds</h2>
+      <span class="hint">render.py:114 · render.py:133</span>
+    </div>
+
+    <section class="panel">
+      <h3>Prompt split: static prefix vs state tail</h3>
+      <p class="sub">The prompt never changes above <code>Text:</code> for a fixed question, so that head is prefilled once and reused.</p>
+      <div class="bars">
+        <div class="bar-row">
+          <span class="bar-row__label">Cold miss</span>
+          <div class="bar">
+            <div class="seg seg--pre">Choices + Question + few-shot examples · ~369 tok</div>
+            <div class="seg seg--miss">state · 68</div>
+          </div>
+        </div>
+        <div class="bar-note">
+          <span>1 full forward</span>
+          <span>Prefix KV is kept (cropped to prefix length); tail KV is discarded.</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-row__label">Warm hit</span>
+          <div class="bar">
+            <div class="seg seg--pre">prefix reused from cache · KV only, no prefill</div>
+            <div class="seg seg--warm">20</div>
+          </div>
+        </div>
+        <div class="bar-note">
+          <span>tail-only prefill</span>
+          <span>Mean prompt tail 68 → 20 tokens; the Doom decision went 357ms → 178ms with no accuracy change.</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="sec-head">
+      <h2>Prefix KV cache</h2>
+      <span class="hint">engine.py:341 · hit vs miss</span>
+    </div>
+
+    <section class="panel">
+      <h3>Lookup keyed by the prefix string</h3>
+      <p class="sub">The full prompt is always tokenized as one string and the cached ids are compared against its head, so the tokens fed to the model are exactly the tokens the uncached path would use.</p>
+      <div class="branch">
+        <div class="branch__col branch__col--miss">
+          <h4><span class="dot dot--miss"></span>MISS — cold</h4>
+          <ol class="steps">
+            <li>Tokenize <code>prefix + suffix</code> in one pass with special tokens.</li>
+            <li>Run one full <code>forward</code> with <code>use_cache=True</code>, read logits at the last position.</li>
+            <li>If the prompt head equals the tokenized prefix, crop the tail off the KV and store <code>(cache, prefix_ids)</code>.</li>
+            <li>Evict the oldest entry while the LRU exceeds <code>max_cached_prefixes</code>.</li>
+          </ol>
+        </div>
+        <div class="branch__col branch__col--hit">
+          <h4><span class="dot dot--hit"></span>HIT — warm</h4>
+          <ol class="steps">
+            <li>Prefix found and this prompt truly starts with its ids (and is longer).</li>
+            <li><code>move_to_end</code> marks it most-recently-used.</li>
+            <li>Prefill only the tail: <code>past_key_values=cache</code>, <code>cache_position=arange(prefix_len, total)</code>.</li>
+            <li>Read logits, then <code>cache.crop(-tail_len)</code> so the entry is prefix-only again.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="cards" style="margin-top:14px">
+        <div class="card">
+          <h3>boundary safety</h3>
+          <p>A tokenizer merge across the prefix/suffix boundary makes the head check fail and the
+          prompt silently falls back to a full pass. Correctness never depends on the cache.</p>
+        </div>
+        <div class="card">
+          <h3>single writer</h3>
+          <p>All cache work runs under <code>_cache_lock</code>; model loading runs under a separate
+          <code>_lock</code>. The engine is safe to share across threads.</p>
+        </div>
+        <div class="card">
+          <h3>why capacity is auto-grown</h3>
+          <p>The LRU must cover every distinct question in a request, or it evicts a prefix before
+          that prefix is ever revisited and the speedup disappears.</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="sec-head">
+      <h2>Contract &amp; measured behaviour</h2>
+      <span class="hint">README.md · demo/README.md</span>
+    </div>
+
+    <section class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Measurement</th>
+            <th class="num">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Doom decision, warm</td><td>p50 per decision, choice over 3–4 actions</td><td class="num"><span class="good">~133ms</span> · 7.2 dec/s</td></tr>
+          <tr><td>Prompt layout fix</td><td>state last + cached prefix, same accuracy</td><td class="num">357ms → <span class="good">178ms</span></td></tr>
+          <tr><td>Prefix cache</td><td>per-decision speedup on repeated questions</td><td class="num"><span class="good">~2.9–5×</span></td></tr>
+          <tr><td>Five-question batch</td><td>noul + choice + score in one request</td><td class="num"><span class="good">815ms</span> warm · 4.3s cold</td></tr>
+          <tr><td>New-prefix demos</td><td>a fresh prefix every step, no reuse</td><td class="num">~500–680ms</td></tr>
+          <tr><td>Undersized cache</td><td>10 questions, cap 8 vs cap 10</td><td class="num"><span class="bad">8051ms</span> vs <span class="good">1771ms</span></td></tr>
+          <tr><td>Accuracy suite</td><td>20 noul · 20 choice · 10 score</td><td class="num"><span class="good">50/50</span></td></tr>
+          <tr><td>Held-out checks</td><td>50-case suite + Doom probe + 8 noul</td><td class="num"><span class="good">63/63</span></td></tr>
+          <tr><td>Trailing-space bug</td><td>scored-letter mass with a space after <code>Answer:</code></td><td class="num"><span class="bad">0.0000</span> vs 0.9871</td></tr>
+          <tr><td>Cached prefix cost</td><td>KV for a 369-token prefix</td><td class="num">~127MB</td></tr>
+          <tr><td>Weight footprint</td><td>download / resident in bf16</td><td class="num">~22GB / ~24GB</td></tr>
+        </tbody>
+        <caption>Illustrative of the design trade-offs recorded in the repo; latency figures are from the Apple Silicon bf16 runs in demo/README.md.</caption>
+      </table>
+    </section>
+
+    <section class="panel" style="margin-top:16px">
+      <h3>Not in the path</h3>
+      <p class="sub">Everything below is deliberately absent, which is what keeps a decision to a single forward pass.</p>
+      <div class="nope">
+        <div><b>generate()</b>No HF generation loop is called anywhere in src/.</div>
+        <div><b>sampling</b>No token is sampled; the distribution is reported, not drawn from.</div>
+        <div><b>decode loop</b>MAX_NEW_TOKENS=1 is a property of the call, not a cap.</div>
+        <div><b>chat template</b>The base model predicts the letter directly after the prompt.</div>
+        <div><b>screen capture</b>Doom is driven from a text state summary, not pixels.</div>
+        <div><b>per-call prefill</b>A cached prefix skips the head; only the tail is prefilled.</div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <code>src/truetype/api.py</code> · <code>service.py</code> · <code>render.py</code> ·
+    <code>questions.py</code> · <code>engine.py</code> · <code>letters.py</code><br>
+    Single-file diagram, rendered with layout CSS only — no scripts, no external assets.
+  </footer>
+
+</div>
+</body>
+</html>
