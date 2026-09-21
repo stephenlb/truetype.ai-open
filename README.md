@@ -1,10 +1,10 @@
 # Truetype.ai Jev Replica
 
-A local latency-match replica of the Jev TypeSafe AI System One API that reads letter logits from
-Gemma 4 12B. `POST /v1/systemone` matches the original request and response
-formats for all three supported question types.
+A local replica of the Jev TypeSafe AI System One API, tuned to match its latency
+while reading letter logits from Gemma 4 12B. `POST /v1/systemone` accepts and
+returns the original formats for all three supported question types.
 
-Each answer uses one token. The engine runs one `forward()` pass, reads the
+Each answer uses one token. The engine runs one `forward()` pass, reads
 next-token logits at the answer position, keeps the 26 A-Z token IDs, and
 applies a temperature-0.7 softmax to the letters allowed by the question. At
 load time, it assigns one token variant to each letter and checks that all 26
@@ -18,6 +18,7 @@ notes.
 - About 24GB of RAM for the 12B weights; prefix caching needs more
 - Optional: an NVIDIA GPU for CUDA, or an Apple Silicon Mac for MPS
 - Optional: ViZDoom (`pip install vizdoom`) for the Doom demos
+- Optional: pygame (`pip install pygame`) to watch the Flappy Bird demo in a window
 
 ## Install
 
@@ -27,7 +28,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-The first load downloads the model (`google/gemma-4-12B`, ~22GB) from Hugging
+The first load downloads `google/gemma-4-12B` (about 22GB) from Hugging
 Face and caches it in `~/.cache/huggingface`. Set `HF_TOKEN` if the repository
 requires authentication.
 
@@ -106,8 +107,9 @@ Response:
 ```
 
 A `score` answer is the expected value `sum(i * p_i)` across the ordinal levels.
-For example, 1.82 reflects probability split between levels 1 and 2. Read the
-score with `confidence`. A `choice` answer is the argmax over the criteria
+For example, 1.82 reflects probability split between levels 1 and 2. Use
+`confidence` to distinguish a concentrated result from a split distribution. A
+`choice` answer is the argmax over the criteria
 letters. A `noul` answer is the probability of "yes."
 
 ### Configuration
@@ -118,7 +120,6 @@ All variables are read at startup.
 |---|---|---|
 | `HOST` | `127.0.0.1` | bind address |
 | `PORT` | `8000` | bind port |
-| `TYPESAFE_REPLICA_API_KEY` | unset | if set, require `Authorization: Bearer <key>` |
 | `TYPESAFE_REPLICA_MODEL_ID` | `google/gemma-4-12B` | Hugging Face model id |
 | `TYPESAFE_REPLICA_DEVICE` | `auto` | `cuda`, `mps`, `cpu`, or `auto` |
 | `TYPESAFE_REPLICA_DTYPE` | `auto` | `bfloat16`, `float16`, `float32`, or `auto` (float32 on CPU, bfloat16 elsewhere) |
@@ -162,6 +163,7 @@ python demo/batch_demo.py       # 5 questions over 1 state in one request
 python demo/game_demo.py        # 4-room text adventure
 python demo/web_nav_demo.py     # support-portal refund flow
 python demo/latency_bench.py    # prefix cache on/off, warm budget assertions
+python flappy/flappy_bird_demo.py --ascii   # Flappy Bird against a running game clock
 ```
 
 Measured on an Apple Silicon Mac (bf16), from `demo/README.md`:
@@ -169,6 +171,7 @@ Measured on an Apple Silicon Mac (bf16), from `demo/README.md`:
 | Demo | Task | Decision type | Warm latency |
 |---|---|---|---|
 | `doom_demo.py` | real Doom, 3 arena scenarios | choice (3-4 actions) | ~133ms (7.2 decisions/sec) |
+| `flappy_bird_demo.py` | Flappy Bird, game clock running | choice (flap / coast) | ~112ms (8.9 decisions/sec) |
 | `game_demo.py` | text adventure | choice | ~500ms (new prefix every step) |
 | `web_nav_demo.py` | page navigation | choice | ~680ms (new prefix every step) |
 | `batch_demo.py` | 5 questions, 1 request | noul + choice + score | ~815ms warm, ~4.3s cold |
@@ -226,9 +229,58 @@ the local direction. A 300-decision MAP01 run reaches 5 kills and 8 items.
 `--self-test` sends 22 synthetic states through the same prompt builders and
 fails if a wording change causes a regression.
 
-The demo does not run Doom in real time. At about 7 decisions/sec against an
+The demo runs slower than Doom's clock. At about 7 decisions/sec against an
 engine running 35 tics/sec, 40 decisions at 4 tics each cover roughly 4.6 seconds
 of game time.
+
+## Flappy Bird
+
+ViZDoom waits for the model: the engine advances only when the demo calls
+`make_action`, so a slow decision costs wall-clock time but never game time. The
+Flappy Bird demo removes that concession. The simulation runs at a fixed 30 fps
+and takes one decision every 4 frames, so each decision is worth 133ms of game
+time whether or not it has arrived, and the bird falls at the rate the model
+thinks.
+
+```bash
+python flappy/flappy_bird_demo.py                  # 150 decisions, 1 episode
+python flappy/flappy_bird_demo.py --ascii          # ...and watch it in the terminal
+python flappy/flappy_bird_demo.py --watch          # ...in a pygame window
+python flappy/flappy_bird_demo.py --decisions 300 --episodes 3
+python flappy/flappy_bird_demo.py --baseline       # reference player, no model
+python flappy/flappy_bird_demo.py --self-test      # check the questions, no game
+```
+
+`--watch` draws the decision alongside the game: a dashed line through the middle
+of the next opening is the line the current question is judged against, and its
+colour, the label on the ground strip and the bar beside it are the phase, the
+chosen action and the model's confidence in it.
+
+Three 250-decision episodes finished without a crash, deciding in 110ms against
+the 133ms budget:
+
+```
+pipes=48  crashes=0  decisions=750
+real-time ratio: 1.19x (100.0s of game in 84.2s of decisions)
+  approach: n=528  mean=110.4ms  p50=115.7ms  p95=121.0ms
+  line_up:  n=222  mean=116.8ms  p50=117.7ms  p95=122.3ms
+```
+
+Crashes are the metric, not pipes. A surviving bird passes one pipe every 15
+decisions whatever it does well, so the pipe count only measures how long the run
+was; 16 per episode is what 250 decisions buys.
+
+The demo projects the bird's coasting path through the whole pipe crossing and
+asks the model one question about the outcome: whether coasting leaves the bird
+too low, lined up, or too high. `--self-test` sends 14 synthetic states through
+the same prompt builders (14/14) and `--baseline` plays the rule the criteria
+describe, which clears 39 pipes in 600 decisions on every seed, so a crash is
+evidence about the decision rather than the tuning.
+
+`--watch` needs `pip install pygame`; without it the demo falls back to `--ascii`.
+The module docstring records the two wording measurements behind the prompts: the
+A-position bias that cost every `coast` case until the no-op action was listed
+first, and the offsets that the model read instead of the verdict.
 
 ## Docker
 
@@ -260,7 +312,8 @@ docker run --rm --gpus all -p 8000:8000 \
 The image binds `0.0.0.0` inside the container. The 12B model needs about 24GB of
 RAM in CPU mode. Mounting the Hugging Face cache keeps the 22GB model download
 out of the image.
-If the port is published beyond localhost, set `TYPESAFE_REPLICA_API_KEY` as well.
+The API has no authentication, so keep the published port on localhost or behind a
+proxy that handles access control.
 
 ## Layout
 
@@ -274,6 +327,7 @@ src/truetype/       the replica library and HTTP API
   api.py            FastAPI app and entry point
 demo/               five demos (see demo/README.md for measurements)
 doom/               full-level Doom demo
+flappy/             Flappy Bird demo, played against a running game clock
 tests/              the 52-test verification suite
 ```
 

@@ -105,7 +105,7 @@ def distribution_from_letter_logits(
     probs = _softmax([v for _, v in ranked], temperature)
 
     distribution = {letter: p for (letter, _), p in zip(ranked, probs)}
-    # Present the full distribution in descending-probability order for stable UX.
+    # Keep the distribution in descending-probability order for stable output.
     ordered = dict(sorted(distribution.items(), key=lambda kv: kv[1], reverse=True))
     return SoftmaxDistribution(
         ranked=tuple((letter, logit) for letter, logit in ranked),

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>truetype.ai replica — end-to-end architecture</title>
+<title>truetype.ai replica: end-to-end architecture</title>
 <meta name="description" content="Single-file, pure-CSS architecture diagram of the truetype.ai TypeSafe System One replica: FastAPI edge to Gemma letter logits.">
 <style>
   :root{
@@ -395,7 +395,7 @@
 
     <div class="sec-head">
       <h2>Request path</h2>
-      <span class="hint">top → bottom · each layer is a module</span>
+      <span class="hint">top to bottom; each layer is a module</span>
     </div>
 
     <div class="stack">
@@ -439,7 +439,7 @@
       <div class="connector connector--api">
         <span class="connector__label">http json ↓</span>
         <span class="connector__arrow"></span>
-        <span class="connector__label">model still loading → 503</span>
+        <span class="connector__label">model still loading: 503</span>
       </div>
 
       <!-- ============ 01 API ============ -->
@@ -471,15 +471,14 @@
             <div class="card">
               <h3>pydantic contract</h3>
               <p><span class="k">SystemOneRequest</span> rejects <span class="k">temperature &lt;= 0</span>
-              at parse time. Empty <span class="k">questions</span> → 422, auth failure → 401,
-              service not yet loaded → 503, <span class="k">ValueError</span> from a bad spec → 422.</p>
+              at parse time. Empty <span class="k">questions</span>: 422;
+              service not yet loaded: 503; <span class="k">ValueError</span> from a bad spec: 422.</p>
             </div>
             <div class="card">
               <h3>process-wide state</h3>
               <p><span class="k">_state["service"]</span> holds the single engine so weights load
-              once per process. The optional bearer key is read from the environment at import.</p>
+              once per process.</p>
               <div class="tags">
-                <span class="tag">TYPESAFE_REPLICA_API_KEY</span>
                 <span class="tag">HOST</span>
                 <span class="tag">PORT</span>
               </div>
@@ -518,7 +517,7 @@
             <div class="card">
               <h3>prefix-cache branch</h3>
               <p>Cache on: <span class="k">ensure_prefix_capacity(len(questions))</span>, then score
-              one question at a time against its own prefix — sequential cached calls beat one
+              one question at a time against its own prefix; sequential cached calls beat one
               uncached batch. Cache off: a single <span class="k">score_batch()</span> over all prompts.</p>
             </div>
             <div class="card">
@@ -530,7 +529,7 @@
             <div class="card">
               <h3>usage accounting</h3>
               <p><span class="k">input_tokens = chars // 4</span> across rendered prompts;
-              <span class="k">output_tokens = number of questions</span> — one token each, by
+              <span class="k">output_tokens = number of questions</span>; one token each, by
               construction.</p>
             </div>
             <div class="card">
@@ -598,8 +597,8 @@
             </div>
             <div class="card">
               <h3>three primitives</h3>
-              <p><span class="k">noul</span> → Y/N (max 2 options). <span class="k">choice</span> →
-              named criteria map, one letter each, max 26. <span class="k">score</span> → ordered
+              <p><span class="k">noul</span>: Y/N (max 2 options). <span class="k">choice</span>:
+              named criteria map, one letter each, max 26. <span class="k">score</span>: ordered
               levels, one letter each, max 26.</p>
             </div>
             <div class="card">
@@ -628,36 +627,36 @@
         <div class="layer__body">
           <div class="cards">
             <div class="card">
-              <h3>load() — <span class="v">engine.py:110</span></h3>
+              <h3>load(): <span class="v">engine.py:110</span></h3>
               <p>Double-checked under a <span class="k">Lock</span>, idempotent. Device auto:
-              cuda → mps → cpu. Dtype auto: <span class="k">float32</span> on cpu,
+              cuda, then mps, then cpu. Dtype auto: <span class="k">float32</span> on cpu,
               <span class="k">bfloat16</span> elsewhere. Left-padding, <span class="k">eval()</span>,
               low-cpu-memory load.</p>
             </div>
             <div class="card">
-              <h3>letter token map — <span class="v">:160</span></h3>
+              <h3>letter token map: <span class="v">:160</span></h3>
               <p>Tries <span class="k">" A"</span> then bare <span class="k">"A"</span>. All 26 must
               be single tokens <em>and</em> distinct, from one variant; mixing shapes makes logits
-              incomparable. No variant → the engine refuses to run.</p>
+              incomparable. The engine refuses to run if neither variant works.</p>
               <div class="tags">
                 <span class="tag">letters_with_leading_space=true</span>
               </div>
             </div>
             <div class="card">
-              <h3>score_batch() — <span class="v">:210</span></h3>
+              <h3>score_batch(): <span class="v">:210</span></h3>
               <p>Splits prompts into chunks of <span class="k">max_batch_size=16</span>, tokenizes with
               padding, and runs one <span class="k">forward</span> per chunk:
               <span class="k">logits_to_keep=1</span>, <span class="k">use_cache=False</span>,
               then <span class="k">logits[:, -1, :].float()</span>.</p>
             </div>
             <div class="card">
-              <h3>score_with_prefix() — <span class="v">:297</span></h3>
+              <h3>score_with_prefix(): <span class="v">:297</span></h3>
               <p>Per suffix: reuse the prefix KV if it is there, otherwise fall back to a full
               uncached pass. Disabled cache or empty prefix routes straight to
               <span class="k">score_batch()</span>.</p>
             </div>
             <div class="card">
-              <h3>ensure_prefix_capacity() — <span class="v">:273</span></h3>
+              <h3>ensure_prefix_capacity(): <span class="v">:273</span></h3>
               <p>Grows one-way to cover every distinct prefix in the request, clamped to the hard
               cap. An undersized LRU evicts before a prefix is revisited and every call repeats
               prefill: <span class="warn">8051ms @ cap 8</span> vs <span class="v">1771ms @ cap 10</span>
@@ -720,7 +719,7 @@
       <div class="connector connector--readout">
         <span class="connector__label">next-token logits ↓</span>
         <span class="connector__arrow"></span>
-        <span class="connector__label">A–Z logits + mass ↑</span>
+        <span class="connector__label">A-Z logits + mass up</span>
       </div>
 
       <!-- ============ 06 READOUT ============ -->
@@ -734,18 +733,18 @@
         <div class="layer__body">
           <div class="cards">
             <div class="card">
-              <h3>batch_letter_logits() — <span class="v">:118</span></h3>
-              <p>Indexes the 26 A–Z token ids out of <span class="k">[batch, vocab]</span> into one
+              <h3>batch_letter_logits(): <span class="v">:118</span></h3>
+              <p>Indexes the 26 A-Z token ids out of <span class="k">[batch, vocab]</span> into one
               logit dict per row. This is the model's raw vote, before any renormalization.</p>
             </div>
             <div class="card">
-              <h3>batch_letter_mass() — <span class="v">:134</span></h3>
-              <p>Fraction of the <em>full-vocabulary</em> probability sitting on A–Z, via
+              <h3>batch_letter_mass(): <span class="v">:134</span></h3>
+              <p>Fraction of the <em>full-vocabulary</em> probability sitting on A-Z, via
               <span class="k">exp(logsumexp(letters) − logsumexp(vocab))</span>. If it approaches
               zero, the argmax is noise in the distribution tail.</p>
             </div>
             <div class="card">
-              <h3>distribution_from_letter_logits() — <span class="v">:85</span></h3>
+              <h3>distribution_from_letter_logits(): <span class="v">:85</span></h3>
               <p>Rank, keep top-k (clamped to 1..26), softmax at temperature over just those k, so
               reported probabilities sum to 1 across surfaced options.</p>
               <div class="tags">
@@ -757,7 +756,7 @@
             <div class="card">
               <h3>failure modes</h3>
               <p><span class="k">LetterLogitError</span> on non-letter keys, an empty readout, or a
-              non-finite softmax denominator. Low temperature cannot change the argmax — it only
+              non-finite softmax denominator. Low temperature cannot change the argmax; it only
               sharpens score and confidence.</p>
             </div>
           </div>
@@ -780,15 +779,15 @@
         <div class="layer__body">
           <div class="chain">
             <span class="chain__item"><b>26 logits</b></span>
-            <span class="chain__arrow">→</span>
+            <span class="chain__arrow">&gt;</span>
             <span class="chain__item">softmax over legal letters</span>
-            <span class="chain__arrow">→</span>
+            <span class="chain__arrow">&gt;</span>
             <span class="chain__item">choice argmax + confidence</span>
-            <span class="chain__arrow">→</span>
+            <span class="chain__arrow">&gt;</span>
             <span class="chain__item">noul = P(yes)</span>
-            <span class="chain__arrow">→</span>
+            <span class="chain__arrow">&gt;</span>
             <span class="chain__item">score = Σ i·p<sub>i</sub></span>
-            <span class="chain__arrow">→</span>
+            <span class="chain__arrow">&gt;</span>
             <span class="chain__item"><b>answers[qid]</b></span>
           </div>
           <div class="cards" style="margin-top:10px">
@@ -809,7 +808,7 @@
             </div>
             <div class="card">
               <h3>envelope</h3>
-              <p><span class="k">{model, answers, usage}</span> — the shape TypeSafe documents, so a
+              <p><span class="k">{model, answers, usage}</span> matches the documented TypeSafe shape, so a
               client can repoint its base URL without touching its parsing.</p>
             </div>
           </div>
@@ -847,7 +846,7 @@
         </div>
         <div class="bar-note">
           <span>tail-only prefill</span>
-          <span>Mean prompt tail 68 → 20 tokens; the Doom decision went 357ms → 178ms with no accuracy change.</span>
+          <span>Mean prompt tail: 68 to 20 tokens. The Doom decision went from 357ms to 178ms with no accuracy change.</span>
         </div>
       </div>
     </section>
@@ -862,7 +861,7 @@
       <p class="sub">The full prompt is always tokenized as one string and the cached ids are compared against its head, so the tokens fed to the model are exactly the tokens the uncached path would use.</p>
       <div class="branch">
         <div class="branch__col branch__col--miss">
-          <h4><span class="dot dot--miss"></span>MISS — cold</h4>
+          <h4><span class="dot dot--miss"></span>MISS: cold</h4>
           <ol class="steps">
             <li>Tokenize <code>prefix + suffix</code> in one pass with special tokens.</li>
             <li>Run one full <code>forward</code> with <code>use_cache=True</code>, read logits at the last position.</li>
@@ -871,7 +870,7 @@
           </ol>
         </div>
         <div class="branch__col branch__col--hit">
-          <h4><span class="dot dot--hit"></span>HIT — warm</h4>
+          <h4><span class="dot dot--hit"></span>HIT: warm</h4>
           <ol class="steps">
             <li>Prefix found and this prompt truly starts with its ids (and is longer).</li>
             <li><code>move_to_end</code> marks it most-recently-used.</li>
@@ -915,7 +914,7 @@
         </thead>
         <tbody>
           <tr><td>Doom decision, warm</td><td>p50 per decision, choice over 3–4 actions</td><td class="num"><span class="good">~133ms</span> · 7.2 dec/s</td></tr>
-          <tr><td>Prompt layout fix</td><td>state last + cached prefix, same accuracy</td><td class="num">357ms → <span class="good">178ms</span></td></tr>
+          <tr><td>Prompt layout fix</td><td>state last + cached prefix, same accuracy</td><td class="num">357ms to <span class="good">178ms</span></td></tr>
           <tr><td>Prefix cache</td><td>per-decision speedup on repeated questions</td><td class="num"><span class="good">~2.9–5×</span></td></tr>
           <tr><td>Five-question batch</td><td>noul + choice + score in one request</td><td class="num"><span class="good">815ms</span> warm · 4.3s cold</td></tr>
           <tr><td>New-prefix demos</td><td>a fresh prefix every step, no reuse</td><td class="num">~500–680ms</td></tr>
@@ -948,7 +947,7 @@
   <footer>
     <code>src/truetype/api.py</code> · <code>service.py</code> · <code>render.py</code> ·
     <code>questions.py</code> · <code>engine.py</code> · <code>letters.py</code><br>
-    Single-file diagram, rendered with layout CSS only — no scripts, no external assets.
+    Single-file diagram rendered with layout CSS only. No scripts or external assets.
   </footer>
 
 </div>

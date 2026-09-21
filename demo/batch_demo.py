@@ -20,7 +20,7 @@ from common import print_header
 
 STATE = (
     "Hi, I was charged twice for order A-104 last week and the duplicate charge "
-    "is still on my card. I need this refunded immediately — rent is due tomorrow. "
+    "is still on my card. I need this refunded immediately; rent is due tomorrow. "
     "Also, the app crashes every time I try to open the receipt. Please help."
 )
 

@@ -1,6 +1,6 @@
 # Demonstrations
 
-Five demos measure how fast a 12B-parameter base model makes decisions when its
+Five demos measure a 12B-parameter base model making decisions when its
 output is restricted to one letter (A-Z) and a low-temperature softmax.
 
 All demos load `google/gemma-4-12B` once (~5s), then time every decision.
@@ -16,8 +16,9 @@ Every answer uses one token because of how the code calls the model:
 - softmaxed at temperature 0.7 over the letters a question declares legal
 
 `noul` and `choice` answers are the argmax of that distribution. `score` is the
-expected value `Σ i·pᵢ` over the ordinal levels. A result of 1.0 can mean
-"confidently level 1" or "split between 0 and 2," so read it with `confidence`.
+expected value `sum(i * p_i)` over the ordinal levels. A result of 1.0 can mean
+"level 1 with high confidence" or "split between 0 and 2," so use
+`confidence` to tell them apart.
 
 ## Run
 
@@ -25,6 +26,7 @@ expected value `Σ i·pᵢ` over the ordinal levels. A result of 1.0 can mean
 # from the repo root
 python demo/doom_demo.py       # real Doom, 3 arena scenarios (add --watch to see it)
 python doom/doom_full_game_demo.py  # real Doom, a full level (see below)
+python flappy/flappy_bird_demo.py   # Flappy Bird at ~1.2x real time (add --ascii)
 python demo/game_demo.py       # text-adventure game
 python demo/web_nav_demo.py    # web-page navigation
 python demo/batch_demo.py      # 5 questions in 1 request
@@ -36,6 +38,7 @@ python demo/latency_bench.py   # prefix-cache benchmark + correctness check
 | Demo | Task | Decision type | Latency (mean) |
 |------|------|---------------|----------------|
 | `doom_demo.py` | real Doom engine, 3 scenarios | choice (3-4 actions) | **~133ms** (7.2 decisions/sec) |
+| `flappy_bird_demo.py` | Flappy Bird, game clock running | choice (flap / coast) | ~112ms (8.9 decisions/sec) |
 | `game_demo.py` | 4-room text adventure | choice | ~500ms (every step a new prefix) |
 | `web_nav_demo.py` | support-portal refund flow | choice | ~680ms (every step a new prefix) |
 | `batch_demo.py` | 5 questions over 1 message | noul + choice + score | ~815ms warm / ~4.3s cold |
@@ -71,12 +74,12 @@ Profiling the warm path (Text `prefix=552 tok, tail=51 tok`):
 | letter slice (26 ids) + mass | 4.9ms |
 | `cache.crop` | 0.09ms |
 
-The forward pass is ~97% of the call. Two properties of it matter:
+The forward pass takes about 97% of the call:
 
-- The floor is ~60ms and changes little with prefix length. A 1-token tail against
+- Its floor is ~60ms and changes little with prefix length. A 1-token tail against
   a cached prefix measured 59ms at 128 tokens and 64ms at 552 tokens. Shrinking the
   prefix is not a lever.
-- Tail tokens cost ~2ms each. Doom's 51-token state was 166ms; a 28-token state is
+- Each tail token costs ~2ms. Doom's 51-token state was 166ms; a 28-token state is
   ~134ms. The tail is the only real lever, and it is what got this under budget.
 
 float16 was also tried and is no faster than bfloat16 (999ms vs 1000ms). This
@@ -103,8 +106,8 @@ across the three scenarios.
 
 ## Why not batch the questions into one forward pass?
 
-Because on this hardware batching buys almost nothing, and the cache buys a lot.
-Measured on 10 questions over one state (`demo/latency_bench.py`):
+On this hardware, batching buys almost nothing and caching removes most of the
+work. Measurements for 10 questions over one state (`demo/latency_bench.py`):
 
 ```
 cache off (1 batched forward)    7687.3ms    <- all 10 prompts, one forward
@@ -120,7 +123,7 @@ prefix KV cache: a warm call encodes only the ~20-token state tail instead of th
 ~370-token full prompt. Different questions have different prefixes, so there is
 nothing shared to batch across them.
 
-This is why `system_one` scores questions **sequentially** against per-question
+`system_one` therefore scores questions sequentially against per-question
 cached prefixes rather than in one batched forward.
 
 ### The capacity requirement (and the bug it caused)
@@ -152,7 +155,7 @@ unwarmed on purpose.
 The API can warm at startup via `TYPESAFE_REPLICA_WARM_QUESTIONS` (a JSON object of
 question specs); it is off by default since unknown workloads gain nothing.
 
-## The bug that passed every test
+## A bug that passed every test
 
 The prompt used to end with `"Answer: "` with a trailing space. That tokenizes to
 a standalone `'▁'` token, separating the space from the letter:
@@ -182,12 +185,12 @@ Two visible consequences, both now fixed:
   scores **1.82 (blocking)**
 - Doom `attack` confidence hovered near 0.5 even when correct; it is now ~0.9
 
-**Test 51** (`test_single_token_letter_readout_contract`) guards this. It asserts the
+Test 51 (`test_single_token_letter_readout_contract`) guards this. It asserts the
 one-token contract, the distinct 26-id A-Z set, that the answer slot has no trailing
 space, and that letter mass exceeds 0.5 for all three question types. Verified to
 fail on both the string check and the mass check when the bug is reintroduced.
 
-### It also changed a demo's behaviour
+### The fix also changed a demo's behaviour
 
 With the readout fixed, `defend_the_center` started answering `attack` 40/40 times
 and stalled at 1 kill. The prompt was underspecified: no
@@ -211,7 +214,7 @@ Profiling showed the forward pass was 99% of a call (tokenising 1.5ms, letter re
 each time. The engine now caches that prefix's KV (`EngineConfig.prefix_cache`, on by
 default) and prefills only the tail.
 
-Safety properties, because a wrong cache is worse than a slow one:
+The cache keeps the uncached path as its correctness reference:
 
 - The full prompt is always tokenised as one string and the cached prefix tokens are
   compared against its head. On mismatch the call falls back to a full forward pass.
@@ -351,8 +354,8 @@ python doom/doom_full_game_demo.py --self-test      # check the questions, no en
 
 ### Model decisions
 
-The phase is chosen deterministically from engine data, and the model answers only
-the ambiguous question for that phase:
+Engine data chooses the phase. The model answers the ambiguous question for that
+phase:
 
 | Phase | When | Options |
 |---|---|---|

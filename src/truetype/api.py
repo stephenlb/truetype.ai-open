@@ -1,8 +1,8 @@
 """TypeSafe-compatible HTTP API backed by Gemma 4 letter logits.
 
-Drop-in for ``POST https://api.typesafe.ai/v1/systemone`` for the question
-primitives this replica supports. The response shape matches TypeSafe's docs:
-``model``, ``answers`` (keyed by question id), and ``usage``.
+The supported question primitives use the request and response formats for
+``POST https://api.typesafe.ai/v1/systemone``. Responses contain ``model``,
+question-keyed ``answers``, and ``usage``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .engine import (
@@ -24,8 +24,6 @@ from .engine import (
 from .service import TypeSafeReplica
 
 logger = logging.getLogger(__name__)
-
-_api_key = os.environ.get("TYPESAFE_REPLICA_API_KEY")
 
 
 class QuestionSpec(BaseModel):
@@ -88,15 +86,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="truetype.ai replica", version="0.1.0", lifespan=lifespan)
 
 
-def _authorize(authorization: str | None) -> None:
-    if _api_key is None:
-        return
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if authorization.removeprefix("Bearer ").strip() != _api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-
 @app.get("/health")
 def health() -> dict:
     service = _state.get("service")
@@ -119,11 +108,7 @@ def health() -> dict:
 
 
 @app.post("/v1/systemone", response_model=SystemOneResponse)
-def system_one(
-    request: SystemOneRequest,
-    authorization: str | None = Header(default=None),
-) -> SystemOneResponse:
-    _authorize(authorization)
+def system_one(request: SystemOneRequest) -> SystemOneResponse:
     service: TypeSafeReplica | None = _state.get("service")
     if service is None:
         raise HTTPException(status_code=503, detail="Model is still loading")

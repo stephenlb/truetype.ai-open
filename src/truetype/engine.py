@@ -7,8 +7,8 @@ Design notes
   the prompt is the answer.
 * The code enforces ``MAX_NEW_TOKENS = 1`` by running one ``forward`` call and
   reading the logits at the last position. It does not sample or decode text.
-* The readout is restricted to the 26 uppercase letters A-Z, all drawn from one
-  token variant so their logits are comparable, then softmaxed at a low
+* The readout keeps the 26 uppercase letters A-Z from one token variant, which
+  makes their logits comparable, then applies softmax at a low
   temperature over just the letters a given question declares legal.
 """
 
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "google/gemma-4-12B"
 
-# The answer is exactly one token. This is a property of how we call the model (a
-# single forward, logits at one position) rather than a cap we ask it to respect.
+# The answer is one token because the engine runs a single forward pass and reads
+# logits at one position.
 MAX_NEW_TOKENS = 1
 
 # Softmax temperature for turning letter logits into a distribution. A low value
@@ -61,8 +61,8 @@ class EngineConfig:
     max_batch_size: int = 16
     trust_remote_code: bool = False
     letters_with_leading_space: bool = True
-    # Reuse the KV cache of the static few-shot prefix across calls. The prefix is
-    # 70-85% of a prompt and identical for every call on the same question, so
+    # Reuse the KV cache of the static few-shot prefix across calls. The prefix
+    # accounts for 70-85% of a prompt and is identical for the same question, so
     # caching it removes most of the prefill work (~2.9x faster per decision).
     prefix_cache: bool = True
     # Each cached prefix costs ~127MB of KV at 369 tokens. This MUST be >= the

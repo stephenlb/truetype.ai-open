@@ -896,7 +896,7 @@ def range_words(distance: float) -> str:
 def combat_state(snap: Snapshot) -> str:
     """The nearest monster is the decisive fact, so it is the last line.
 
-    The health/weapon line is omitted on purpose. It is not just dead weight: with
+    The health/weapon line is omitted because it changes the answer. With
     "The selected weapon is pistol with 30 shots." present, the model answered
     ``shoot`` on a monster 1900 units away, and without it the same state answered
     ``advance``. Nothing in the criteria depends on the weapon, so the line only
@@ -937,7 +937,7 @@ def stuck_state(snap: Snapshot, stuck_for: int) -> str:
         lines.append("The way back is open.")
     if stuck_for >= 2:
         # On the first two ticks the model is allowed to strafe; after that the
-        # state says plainly that sideways has failed, which is what unlocks
+        # state says that sideways movement failed, which allows
         # ``back up``. Without this the agent strafed into the same wall forever.
         lines.append(
             f"The player has been stuck here for {stuck_for} decisions and "
