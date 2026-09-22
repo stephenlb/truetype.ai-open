@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 
 from .engine import DEFAULT_TEMPERATURE, EngineConfig, GemmaLetterEngine
+from .letters import LetterReadout
 from .questions import Question, QuestionAnswer, build_question, score_question
 from .render import render_batch, render_example_prefix, render_target_block
 
@@ -55,6 +56,35 @@ class TypeSafeReplica:
             )
         return (time.perf_counter() - started) * 1000
 
+    def _score_questions(
+        self,
+        questions: list[Question],
+        state: str,
+        *,
+        temperature: float,
+    ) -> tuple[list[LetterReadout], dict[str, str]]:
+        """Render once for accounting, then use the fastest scoring path available."""
+        rendered = render_batch(questions, state)
+        prompts = {item.question_id: item.text for item in rendered}
+
+        if not self.engine.config.prefix_cache:
+            return (
+                self.engine.score_batch(list(prompts.values()), temperature=temperature),
+                prompts,
+            )
+
+        self.engine.ensure_prefix_capacity(len(questions))
+        readouts = []
+        for question in questions:
+            readouts.extend(
+                self.engine.score_with_prefix(
+                    render_example_prefix(question),
+                    [render_target_block(question, state)],
+                    temperature=temperature,
+                )
+            )
+        return readouts, prompts
+
     def system_one(
         self,
         *,
@@ -72,31 +102,9 @@ class TypeSafeReplica:
             build_question(qid, spec) for qid, spec in questions.items()
         ]
 
-        rendered = render_batch(parsed, state_text)
-        if self.engine.config.prefix_cache:
-            # Each question has its own static few-shot prefix, so score them one at
-            # a time against their own cached prefix. Sequential cached calls beat a
-            # single uncached batch: the prefill saved per question is far larger
-            # than anything batching buys on this hardware.
-            #
-            # Capacity must cover every prefix in the request or the LRU evicts one
-            # before it is ever revisited, turning every call into a miss and erasing
-            # the win entirely (measured: 10 questions with an 8-entry cache ran at
-            # 8051ms vs 1771ms with a 10-entry cache).
-            self.engine.ensure_prefix_capacity(len(parsed))
-            distributions = []
-            for question in parsed:
-                distributions.extend(
-                    self.engine.score_with_prefix(
-                        render_example_prefix(question),
-                        [render_target_block(question, state_text)],
-                        temperature=temperature,
-                    )
-                )
-        else:
-            distributions = self.engine.score_batch(
-                [item.text for item in rendered], temperature=temperature
-            )
+        distributions, prompts = self._score_questions(
+            parsed, state_text, temperature=temperature
+        )
 
         answers: dict[str, dict] = {}
         debug: dict[str, dict] = {}
@@ -110,13 +118,13 @@ class TypeSafeReplica:
             answers[question.id] = answer.to_dict()
             if include_debug:
                 debug[question.id] = {
-                    "prompt": next(r.text for r in rendered if r.question_id == question.id),
+                    "prompt": prompts[question.id],
                     "letter_logits": readout.logits,
                     "top_k": readout.top.top_k,
                     "top_k_letters": [letter for letter, _ in readout.top.ranked],
                 }
 
-        input_tokens = sum(len(r.text) for r in rendered) // 4
+        input_tokens = sum(map(len, prompts.values())) // 4
         result = BatchResult(
             model=model or self.model_name,
             answers=answers,

@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .letters import LETTERS, LETTER_INDEX
+from .letters import LETTERS
 
 # Fixed bank of question-agnostic demonstrations. Their predicates differ from the
 # target question on purpose: they teach the letter-slot format, not the task.
@@ -46,7 +46,6 @@ class Question:
 
 @dataclass(frozen=True)
 class QuestionAnswer:
-    id: str
     type: str
     choice: str | None = None
     probabilities: dict[str, float] = field(default_factory=dict)
@@ -54,7 +53,6 @@ class QuestionAnswer:
     noul: float | None = None
     score: float | None = None
     legend: dict[str, str] | None = None
-    letters: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         payload: dict = {"type": self.type}
@@ -148,39 +146,45 @@ def build_question(qid: str, spec: dict) -> Question:
     criteria = spec.get("criteria")
 
     if qtype == "noul":
-        options = []
         if isinstance(criteria, dict):
             yes_desc = criteria.get("true")
             no_desc = criteria.get("false")
         else:
             yes_desc = no_desc = None
         yes_text, no_text = _predicate_forms(instructions)
-        options = [
-            QuestionOption("Y", "yes", yes_desc or yes_text),
-            QuestionOption("N", "no", no_desc or no_text),
-        ]
-        return Question(id=qid, type="noul", instructions=instructions, options=options, criteria=criteria)
+        return Question(
+            id=qid,
+            type=qtype,
+            instructions=instructions,
+            options=[
+                QuestionOption("Y", "yes", yes_desc or yes_text),
+                QuestionOption("N", "no", no_desc or no_text),
+            ],
+            criteria=criteria,
+        )
 
     if qtype == "choice":
         if not isinstance(criteria, dict) or not criteria:
             raise ValueError(f"choice question {qid!r} requires a non-empty criteria map")
         if len(criteria) > len(LETTERS):
             raise ValueError(f"choice question {qid!r} supports at most 26 options")
-        options = [
-            QuestionOption(LETTERS[i], name, description)
-            for i, (name, description) in enumerate(criteria.items())
-        ]
-        return Question(id=qid, type="choice", instructions=instructions, options=options, criteria=criteria)
+        entries = list(criteria.items())
+    else:
+        if not isinstance(criteria, list) or len(criteria) < 2:
+            raise ValueError(f"score question {qid!r} requires an ordered list of at least two levels")
+        if len(criteria) > len(LETTERS):
+            raise ValueError(f"score question {qid!r} supports at most 26 levels")
+        entries = [(f"level {i}", level) for i, level in enumerate(criteria)]
 
-    if not isinstance(criteria, list) or len(criteria) < 2:
-        raise ValueError(f"score question {qid!r} requires an ordered list of at least two levels")
-    if len(criteria) > len(LETTERS):
-        raise ValueError(f"score question {qid!r} supports at most 26 levels")
     options = [
-        QuestionOption(LETTERS[i], f"level {i}", level if isinstance(level, str) else str(level))
-        for i, level in enumerate(criteria)
+        QuestionOption(
+            LETTERS[i],
+            label,
+            description if isinstance(description, str) else str(description),
+        )
+        for i, (label, description) in enumerate(entries)
     ]
-    return Question(id=qid, type="score", instructions=instructions, options=options, criteria=criteria)
+    return Question(id=qid, type=qtype, instructions=instructions, options=options, criteria=criteria)
 
 
 def score_question(question: Question, letter_logits: dict[str, float], temperature: float = 1.0) -> QuestionAnswer:
@@ -194,35 +198,27 @@ def score_question(question: Question, letter_logits: dict[str, float], temperat
     probs = _softmax(logits, temperature)
 
     if question.type == "noul":
-        by_label = {option.label: p for option, p in zip(question.options, probs)}
-        noul = by_label.get("yes", 0.0)
+        noul = probs[0]
         return QuestionAnswer(
-            id=question.id,
             type="noul",
             noul=noul,
-            probabilities={option.label: p for option, p in zip(question.options, probs)},
-            letters={letter: p for letter, p in zip(option_letters, probs)},
         )
 
     if question.type == "choice":
         pairs = sorted(zip(question.options, probs), key=lambda op: op[1], reverse=True)
         top = pairs[0]
         return QuestionAnswer(
-            id=question.id,
             type="choice",
             choice=top[0].label,
             probabilities={option.label: p for option, p in pairs},
             confidence=confidence_from_probabilities(probs),
-            letters={letter: p for letter, p in zip(option_letters, probs)},
         )
 
     score = sum(i * p for i, p in enumerate(probs))
     return QuestionAnswer(
-        id=question.id,
         type="score",
         score=score,
         probabilities={str(i): p for i, p in enumerate(probs)},
         legend={str(i): option.description or "" for i, option in enumerate(question.options)},
         confidence=confidence_from_probabilities(probs),
-        letters={letter: p for letter, p in zip(option_letters, probs)},
     )
