@@ -1,0 +1,84 @@
+{
+  "identity": {
+    "agentName": "jev_open_source",
+    "displayName": "Jev Open Source",
+    "description": "Runs TypeSafe-compatible System One evaluations with the open-source Gemma-based Jev replica.",
+    "version": "1.0.0",
+    "provider": {
+      "organization": "jev_open_source"
+    }
+  },
+  "capabilities": {
+    "taskKinds": [
+      "request"
+    ]
+  },
+  "io": {
+    "inputs": [
+      {
+        "id": "request",
+        "description": "A TypeSafe-compatible POST /v1/systemone request body.",
+        "contentType": "application/json",
+        "required": true,
+        "example": {
+          "state": "I was charged twice for order A-104. Please refund the duplicate.",
+          "questions": {
+            "refund": {
+              "type": "noul",
+              "instructions": "Does the text request a refund?"
+            }
+          }
+        },
+        "schema": {
+          "type": "object",
+          "required": ["state", "questions"],
+          "properties": {
+            "state": {
+              "type": "string",
+              "title": "State",
+              "description": "Text to evaluate. Programmatic callers may also submit an object or array.",
+              "default": "I was charged twice for order A-104. Please refund the duplicate."
+            },
+            "model": {
+              "type": "string",
+              "title": "Model",
+              "default": "gemma-4-12b"
+            },
+            "questions": {
+              "type": "object",
+              "title": "Questions",
+              "description": "Non-empty map of question IDs to {type, instructions, criteria?} specs."
+            },
+            "temperature": {
+              "type": "number",
+              "title": "Temperature",
+              "default": 0.7
+            }
+          }
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "id": "response",
+        "description": "The TypeSafe-compatible System One response: model, answers, and usage.",
+        "contentType": "application/json",
+        "guaranteed": true
+      }
+    ]
+  },
+  "tags": [
+    {
+      "id": "main",
+      "name": "Main",
+      "description": "Handles tasks"
+    }
+  ],
+  "runtime": {
+    "handler": "./handler.py",
+    "handlerExport": "handler",
+    "concurrency": 1,
+    "expectedInstances": 1,
+    "maxRunningTimeSec": 300
+  }
+}

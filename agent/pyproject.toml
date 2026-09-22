@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-open-source-blocks-agent"
+version = "1.0.0"
+description = "Blocks Network adapter for the open-source Jev System One replica"
+requires-python = ">=3.12"
+dependencies = [
+    "blocks-network",
+    "truetype-replica @ git+https://github.com/stephenlb/truetype.ai-open.git",
+    "accelerate",
+    "pillow",
+]
+
+[tool.setuptools]
+py-modules = ["handler"]
