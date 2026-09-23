@@ -115,25 +115,46 @@ def distribution_from_letter_logits(
     )
 
 
-def batch_letter_logits(
-    next_token_logits,  # torch.Tensor [batch, vocab]
-    letter_token_ids: dict[str, int],
-) -> list[dict[str, float]]:
-    """Gather per-letter logits for every row of a batched next-token logits tensor."""
+def gather_letter_logits(next_token_logits, letter_token_ids):
+    """Return the ``[batch, 26]`` A-Z slice of a vocabulary-logit tensor.
+
+    ``letter_token_ids`` may be the device-resident tensor owned by the engine.
+    Keeping it on-device avoids allocating a Python list and an indexing tensor on
+    every request.
+    """
     if next_token_logits.dim() != 2:
         raise LetterLogitError("expected next-token logits of shape [batch, vocab]")
 
-    ids = list(letter_token_ids.values())
-    gathered = next_token_logits[:, ids]
+    import torch
+
+    ids = (
+        letter_token_ids
+        if isinstance(letter_token_ids, torch.Tensor)
+        else torch.tensor(list(letter_token_ids.values()), device=next_token_logits.device)
+    )
+    return next_token_logits.index_select(1, ids)
+
+
+def batch_letter_logits(
+    gathered_logits, letters: tuple[str, ...] | dict[str, int] = LETTERS
+) -> list[dict[str, float]]:
+    """Convert a previously gathered ``[batch, 26]`` A-Z tensor to dictionaries."""
+    # Preserve the original public helper signature for downstream callers while
+    # allowing the engine to pass the already-gathered slice.
+    if isinstance(letters, dict):
+        gathered_logits = gather_letter_logits(gathered_logits, letters)
+        letters = tuple(letters)
+    if gathered_logits.dim() != 2 or gathered_logits.shape[1] != len(letters):
+        raise LetterLogitError("expected gathered letter logits of shape [batch, 26]")
     return [
-        {letter: float(value) for letter, value in zip(letter_token_ids, row)}
-        for row in gathered
+        {letter: float(value) for letter, value in zip(letters, row)}
+        for row in gathered_logits
     ]
 
 
 def batch_letter_mass(
     next_token_logits,  # torch.Tensor [batch, vocab]
-    letter_token_ids: dict[str, int],
+    gathered_logits,  # torch.Tensor [batch, 26], or legacy letter-id mapping
 ) -> list[float]:
     """Fraction of full-vocabulary probability sitting on the A-Z tokens, per row.
 
@@ -145,7 +166,9 @@ def batch_letter_mass(
     if next_token_logits.dim() != 2:
         raise LetterLogitError("expected next-token logits of shape [batch, vocab]")
 
-    ids = list(letter_token_ids.values())
+    if isinstance(gathered_logits, dict):
+        gathered_logits = gather_letter_logits(next_token_logits, gathered_logits)
+
     total = torch.logsumexp(next_token_logits, dim=-1)
-    letters = torch.logsumexp(next_token_logits[:, ids], dim=-1)
+    letters = torch.logsumexp(gathered_logits, dim=-1)
     return [float(value) for value in torch.exp(letters - total)]

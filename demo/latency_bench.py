@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from truetype.engine import EngineConfig, GemmaLetterEngine
+from truetype.questions import build_question
+from truetype.render import render_example_prefix, render_target_block
 from truetype.service import TypeSafeReplica
 from common import print_header
 
@@ -165,9 +167,13 @@ def main() -> None:
 
     cached = GemmaLetterEngine(EngineConfig(top_k=5, prefix_cache=True))
     cached.load()
+    print(f"Backend: {cached._model.device.type}")
     # Second engine shares the loaded weights so only the cache policy differs.
     plain = GemmaLetterEngine(EngineConfig(top_k=5, prefix_cache=False))
-    for attr in ("_model", "_tokenizer", "_letter_token_ids", "_pad_token_id", "load_seconds"):
+    for attr in (
+        "_model", "_tokenizer", "_letter_token_ids", "_letter_token_id_tensor",
+        "_pad_token_id", "load_seconds",
+    ):
         setattr(plain, attr, getattr(cached, attr))
 
     svc_cached, svc_plain = TypeSafeReplica(cached), TypeSafeReplica(plain)
@@ -204,6 +210,20 @@ def main() -> None:
             over_budget.append((label, on))
         print(f"  {label:<22} cache on {on:7.1f}ms   off {off:7.1f}ms   {off/on:.2f}x{flag}")
 
+    print("\nCached-prefix suffix batching (8 equal-length tails):")
+    doom_prefix = render_example_prefix(build_question("act", doom_q["act"]))
+    tails = [
+        render_target_block(build_question("act", doom_q["act"]), doom_state(f"position {i:02d}"))
+        for i in range(8)
+    ]
+    # Populate once, then compare the old call-per-suffix shape to the batched
+    # API. Equal-length tails isolate KV batching from length bucketing.
+    cached.score_with_prefix(doom_prefix, tails[:1])
+    individual = mean_ms(lambda: [cached.score_with_prefix(doom_prefix, [tail]) for tail in tails], 3)
+    batched = mean_ms(lambda: cached.score_with_prefix(doom_prefix, tails), 3)
+    print(f"  one call per suffix         {individual:7.1f}ms")
+    print(f"  one batched suffix call     {batched:7.1f}ms   {individual/batched:.2f}x")
+
     print("\n5-question request:")
     cached._prefix_caches.clear()
     cold = mean_ms(lambda: svc_cached.system_one(state=BATCH_STATE, questions=BATCH_Q), 1)
@@ -235,6 +255,7 @@ def main() -> None:
             "_model",
             "_tokenizer",
             "_letter_token_ids",
+            "_letter_token_id_tensor",
             "_pad_token_id",
             "load_seconds",
             "letter_variant",

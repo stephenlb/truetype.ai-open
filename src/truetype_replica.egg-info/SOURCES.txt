@@ -1,8 +1,8 @@
+README.md
 pyproject.toml
 src/truetype/api.py
 src/truetype/engine.py
 src/truetype/letters.py
-src/truetype/prompts.py
 src/truetype/questions.py
 src/truetype/render.py
 src/truetype/service.py

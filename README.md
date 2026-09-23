@@ -135,10 +135,10 @@ probability of "yes."
 python -m pytest
 ```
 
-The suite runs 50 functional cases against the live model: 20 `noul`, 20
-`choice`, and 10 `score`. Two structural tests check the single-token letter
-readout contract and prefix-cache sizing. The readout test requires one A-Z
-token with nonzero probability mass among the scored letters.
+The suite has 102 tests: 50 fast deterministic contracts plus 50 functional
+cases against the live model (20 `noul`, 20 `choice`, and 10 `score`) and two
+live structural checks. The readout check requires the A-Z tokens to carry
+meaningful probability mass, while the cache check verifies capacity sizing.
 
 Run the suite from the repository root. The first run loads the 12B model and
 takes about a minute. Subsequent tests reuse the session model and take seconds.

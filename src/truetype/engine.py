@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from copy import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -24,10 +25,10 @@ from typing import Sequence
 from .letters import (
     LETTERS,
     LetterReadout,
-    SoftmaxDistribution,
     batch_letter_logits,
     batch_letter_mass,
     distribution_from_letter_logits,
+    gather_letter_logits,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,8 +60,16 @@ class EngineConfig:
     top_k: int = 5
     temperature: float = DEFAULT_TEMPERATURE
     max_batch_size: int = 16
+    # Length bucketing can reduce padding for large, heterogeneous CPU/CUDA
+    # batches. On the tested MPS workload, its extra tokenization pass costs
+    # more than the saved work, so leave it opt-in.
+    bucket_by_length: bool = False
     trust_remote_code: bool = False
     letters_with_leading_space: bool = True
+    # Full-vocabulary logsumexp is useful validation telemetry, but is an
+    # expensive reduction for large vocabularies. Keep it on by default for the
+    # existing API contract; high-throughput callers may opt out.
+    report_letter_mass: bool = True
     # Reuse the KV cache of the static few-shot prefix across calls. The prefix
     # accounts for 70-85% of a prompt and is identical for the same question, so
     # caching it removes most of the prefill work (~2.9x faster per decision).
@@ -76,6 +85,30 @@ class EngineConfig:
     extra: dict = field(default_factory=dict)
 
 
+@dataclass
+class PrefixCacheEntry:
+    """A reusable prefix KV cache with its own extension lock."""
+
+    cache: object
+    prefix_ids: object
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _fork_cache_for_extension(cache: object) -> object:
+    """Copy cache metadata without duplicating immutable prefix KV tensors.
+
+    Transformers' dynamic cache appends by assigning new key/value tensors to
+    its layer objects.  A shallow copy of the cache and each layer therefore
+    gives an extension its own mutable metadata while safely sharing the
+    read-only prefix tensors.  This avoids copying roughly 127MB of MPS KV
+    tensors before every cached request; the model still materializes the
+    required prefix-plus-tail tensors during its normal attention work.
+    """
+    fork = copy(cache)
+    fork.layers = [copy(layer) for layer in cache.layers]
+    return fork
+
+
 class GemmaLetterEngine:
     """Thread-safe wrapper that loads on first use and returns letter distributions."""
 
@@ -86,10 +119,13 @@ class GemmaLetterEngine:
         self._model = None
         self._tokenizer = None
         self._letter_token_ids: dict[str, int] = {}
+        self._letter_token_id_tensor = None
         self._pad_token_id: int | None = None
         self.load_seconds: float | None = None
-        # prefix string -> (KV cache, prefix token ids)
-        self._prefix_caches: "OrderedDict[str, tuple[object, object]]" = OrderedDict()
+        # The LRU lock only protects map operations. Inference forks the cache's
+        # lightweight metadata under an entry-local lock, allowing independent
+        # prefixes to run without copying the static MPS KV tensors.
+        self._prefix_caches: "OrderedDict[str, PrefixCacheEntry]" = OrderedDict()
         self.prefix_cache_hits = 0
         self.prefix_cache_misses = 0
         self.prefix_cache_evictions = 0
@@ -143,6 +179,9 @@ class GemmaLetterEngine:
             self._model.eval()
 
             self._letter_token_ids = self._build_letter_token_ids()
+            self._letter_token_id_tensor = torch.tensor(
+                list(self._letter_token_ids.values()), dtype=torch.long, device=self._model.device
+            )
             self._pad_token_id = self._tokenizer.pad_token_id
             if self._pad_token_id is None:
                 self._pad_token_id = self._tokenizer.eos_token_id
@@ -222,12 +261,22 @@ class GemmaLetterEngine:
         k = self.config.top_k if top_k is None else top_k
         temp = self.config.temperature if temperature is None else temperature
 
-        results: list[LetterReadout] = []
+        # Bucketing is opt-in: on the measured MPS workload the extra
+        # tokenization pass outweighed padding savings. Reassemble by index so
+        # this remains an order-preserving public API.
+        ordered = list(enumerate(prompts))
+        if self.config.bucket_by_length:
+            tokenized = self._tokenizer(list(prompts), add_special_tokens=True)
+            lengths = [len(ids) for ids in tokenized.input_ids]
+            ordered.sort(key=lambda item: lengths[item[0]])
+        results: list[LetterReadout | None] = [None] * len(prompts)
         batch_size = max(1, self.config.max_batch_size)
-        for start in range(0, len(prompts), batch_size):
-            chunk = list(prompts[start : start + batch_size])
-            results.extend(self._score_chunk(chunk, k, temp))
-        return results
+        for start in range(0, len(ordered), batch_size):
+            indexed_chunk = ordered[start : start + batch_size]
+            chunk_results = self._score_chunk([prompt for _, prompt in indexed_chunk], k, temp)
+            for (index, _), result in zip(indexed_chunk, chunk_results):
+                results[index] = result
+        return [result for result in results if result is not None]
 
     def _score_chunk(
         self, prompts: list[str], top_k: int, temperature: float
@@ -252,8 +301,13 @@ class GemmaLetterEngine:
             )
 
         next_token_logits = outputs.logits[:, -1, :].float()
-        letter_logits = batch_letter_logits(next_token_logits, self._letter_token_ids)
-        masses = batch_letter_mass(next_token_logits, self._letter_token_ids)
+        letter_values = gather_letter_logits(next_token_logits, self._letter_token_id_tensor)
+        letter_logits = batch_letter_logits(letter_values)
+        masses = (
+            batch_letter_mass(next_token_logits, letter_values)
+            if self.config.report_letter_mass
+            else [None] * len(letter_logits)
+        )
         return [
             LetterReadout(
                 logits=row,
@@ -267,6 +321,17 @@ class GemmaLetterEngine:
         self, prompt: str, *, top_k: int | None = None, temperature: float | None = None
     ) -> LetterReadout:
         return self.score_batch([prompt], top_k=top_k, temperature=temperature)[0]
+
+    def _letter_readout_values(self, next_token_logits):
+        """Gather the A-Z slice once and optionally calculate mass from it."""
+        letter_values = gather_letter_logits(next_token_logits, self._letter_token_id_tensor)
+        logits = batch_letter_logits(letter_values)
+        mass = (
+            batch_letter_mass(next_token_logits, letter_values)
+            if self.config.report_letter_mass
+            else [None] * len(logits)
+        )
+        return logits, mass
 
     # ------------------------------------------------------------ prefix caching
 
@@ -323,8 +388,7 @@ class GemmaLetterEngine:
             )
 
         results: list[LetterReadout] = []
-        for suffix in suffixes:
-            scored = self._letter_logits_cached(prefix, suffix)
+        for suffix, scored in zip(suffixes, self._letter_logits_cached_many(prefix, suffixes)):
             if scored is None:
                 results.append(self.score_batch([prefix + suffix], top_k=k, temperature=temp)[0])
             else:
@@ -338,6 +402,70 @@ class GemmaLetterEngine:
                 )
         return results
 
+    def _letter_logits_cached_many(
+        self, prefix: str, suffixes: Sequence[str]
+    ) -> list[tuple[dict[str, float], float | None] | None]:
+        """Score compatible cached tails in batches grouped by token length.
+
+        A cache miss seeds the prefix from one full prompt (preserving the
+        tokenizer-boundary validation); remaining equal-length tails share one
+        repeated KV cache and one forward pass.
+        """
+        import torch
+
+        with self._cache_lock:
+            entry = self._prefix_caches.get(prefix)
+
+        if entry is None:
+            first = self._letter_logits_cached(prefix, suffixes[0])
+            if len(suffixes) == 1:
+                return [first]
+            rest = self._letter_logits_cached_many(prefix, suffixes[1:])
+            return [first, *rest]
+
+        device = self._model.device
+        encoded = [
+            self._tokenizer(prefix + suffix, return_tensors="pt", add_special_tokens=True).input_ids.to(device)
+            for suffix in suffixes
+        ]
+        prefix_len = entry.prefix_ids.shape[1]
+        grouped: dict[int, list[tuple[int, object]]] = {}
+        results: list[tuple[dict[str, float], float | None] | None] = [None] * len(suffixes)
+        for index, full_ids in enumerate(encoded):
+            total = full_ids.shape[1]
+            if total <= prefix_len or not torch.equal(full_ids[:, :prefix_len], entry.prefix_ids):
+                continue
+            grouped.setdefault(total, []).append((index, full_ids[:, prefix_len:]))
+
+        with self._cache_lock:
+            # LRU bookkeeping is deliberately short; inference below is guarded
+            # only by this prefix's lock.
+            # A different request may have evicted this entry after our lookup.
+            # The local entry is still safe to score, but it is no longer an LRU
+            # hit and must not be moved by key.
+            if grouped and self._prefix_caches.get(prefix) is entry:
+                self._prefix_caches.move_to_end(prefix)
+                self.prefix_cache_hits += sum(map(len, grouped.values()))
+
+        for total, group in grouped.items():
+            tails = torch.cat([tail for _, tail in group], dim=0)
+            with entry.lock:
+                cache = _fork_cache_for_extension(entry.cache)
+                cache.batch_repeat_interleave(len(group))
+                with torch.inference_mode():
+                    out = self._model(
+                        input_ids=tails,
+                        attention_mask=torch.ones((len(group), total), dtype=torch.long, device=device),
+                        past_key_values=cache,
+                        cache_position=torch.arange(prefix_len, total, device=device),
+                        logits_to_keep=MAX_NEW_TOKENS,
+                        use_cache=False,
+                    )
+            logits, masses = self._letter_readout_values(out.logits[:, -1, :].float())
+            for (index, _), row, mass in zip(group, logits, masses):
+                results[index] = row, mass
+        return results
+
     def _letter_logits_cached(
         self, prefix: str, suffix: str
     ) -> tuple[dict[str, float], float] | None:
@@ -349,24 +477,35 @@ class GemmaLetterEngine:
         """
         import torch
 
+        device = self._model.device
+        full_ids = self._tokenizer(
+            prefix + suffix, return_tensors="pt", add_special_tokens=True
+        ).input_ids.to(device)
         with self._cache_lock:
-            device = self._model.device
-            full_ids = self._tokenizer(
-                prefix + suffix, return_tensors="pt", add_special_tokens=True
-            ).input_ids.to(device)
             total = full_ids.shape[1]
 
             entry = self._prefix_caches.get(prefix)
             if entry is not None:
-                cache, prefix_ids = entry
-                prefix_len = prefix_ids.shape[1]
+                prefix_len = entry.prefix_ids.shape[1]
                 # Only safe if this prompt really begins with the cached tokens.
-                if total <= prefix_len or not torch.equal(full_ids[:, :prefix_len], prefix_ids):
+                if total <= prefix_len or not torch.equal(full_ids[:, :prefix_len], entry.prefix_ids):
                     return None
-                self._prefix_caches.move_to_end(prefix)
-                self.prefix_cache_hits += 1
+                # The entry can be evicted after the lookup above. Its tensors
+                # remain valid for this request, but avoid moving a missing (or
+                # replacement) mapping entry.
+                if self._prefix_caches.get(prefix) is entry:
+                    self._prefix_caches.move_to_end(prefix)
+                    self.prefix_cache_hits += 1
 
                 tail = full_ids[:, prefix_len:]
+            else:
+                self.prefix_cache_misses += 1
+
+        if entry is not None:
+            # Do not mutate the reusable cache while serving a tail. This keeps
+            # callers sharing this prefix safe while other prefixes proceed too.
+            with entry.lock:
+                cache = _fork_cache_for_extension(entry.cache)
                 with torch.inference_mode():
                     out = self._model(
                         input_ids=tail,
@@ -374,41 +513,35 @@ class GemmaLetterEngine:
                         past_key_values=cache,
                         cache_position=torch.arange(prefix_len, total, device=device),
                         logits_to_keep=MAX_NEW_TOKENS,
-                        use_cache=True,
+                        use_cache=False,
                     )
                 next_token_logits = out.logits[:, -1, :].float()
-                # Drop the tail so the cache holds only the prefix again.
-                cache.crop(-(total - prefix_len))
-                return (
-                    batch_letter_logits(next_token_logits, self._letter_token_ids)[0],
-                    batch_letter_mass(next_token_logits, self._letter_token_ids)[0],
-                )
+            logits, masses = self._letter_readout_values(next_token_logits)
+            return logits[0], masses[0]
 
-            # Miss: one full forward, then keep the prefix slice of its KV cache.
-            self.prefix_cache_misses += 1
-            prefix_ids = self._tokenizer(
-                prefix, return_tensors="pt", add_special_tokens=True
-            ).input_ids.to(device)
-            prefix_len = prefix_ids.shape[1]
+        # Miss: one full forward, then keep the prefix slice of its KV cache.
+        prefix_ids = self._tokenizer(
+            prefix, return_tensors="pt", add_special_tokens=True
+        ).input_ids.to(device)
+        prefix_len = prefix_ids.shape[1]
 
-            with torch.inference_mode():
-                out = self._model(
-                    input_ids=full_ids,
-                    attention_mask=torch.ones((1, total), dtype=torch.long, device=device),
-                    logits_to_keep=MAX_NEW_TOKENS,
-                    use_cache=True,
-                )
-            next_token_logits = out.logits[:, -1, :].float()
+        with torch.inference_mode():
+            out = self._model(
+                input_ids=full_ids,
+                attention_mask=torch.ones((1, total), dtype=torch.long, device=device),
+                logits_to_keep=MAX_NEW_TOKENS,
+                use_cache=True,
+            )
+        next_token_logits = out.logits[:, -1, :].float()
 
-            if total > prefix_len and torch.equal(full_ids[:, :prefix_len], prefix_ids):
-                cache = out.past_key_values
-                cache.crop(-(total - prefix_len))
-                self._prefix_caches[prefix] = (cache, prefix_ids)
+        if total > prefix_len and torch.equal(full_ids[:, :prefix_len], prefix_ids):
+            cache = out.past_key_values
+            cache.crop(-(total - prefix_len))
+            with self._cache_lock:
+                self._prefix_caches[prefix] = PrefixCacheEntry(cache, prefix_ids)
                 while len(self._prefix_caches) > max(1, self.config.max_cached_prefixes):
                     self._prefix_caches.popitem(last=False)
                     self.prefix_cache_evictions += 1
 
-            return (
-                batch_letter_logits(next_token_logits, self._letter_token_ids)[0],
-                batch_letter_mass(next_token_logits, self._letter_token_ids)[0],
-            )
+        logits, masses = self._letter_readout_values(next_token_logits)
+        return logits[0], masses[0]
