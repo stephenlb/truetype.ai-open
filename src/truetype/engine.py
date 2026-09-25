@@ -26,7 +26,6 @@ from .letters import (
     LETTERS,
     LetterReadout,
     batch_letter_logits,
-    batch_letter_mass,
     distribution_from_letter_logits,
     gather_letter_logits,
 )
@@ -66,10 +65,9 @@ class EngineConfig:
     bucket_by_length: bool = False
     trust_remote_code: bool = False
     letters_with_leading_space: bool = True
-    # Full-vocabulary logsumexp is useful validation telemetry, but is an
-    # expensive reduction for large vocabularies. Keep it on by default for the
-    # existing API contract; high-throughput callers may opt out.
-    report_letter_mass: bool = True
+    # Replace Gemma's vocabulary projection with its 26 A-Z rows on accelerators.
+    # Set false to retain the original head for parity diagnosis.
+    restrict_output_to_letters: bool = True
     # Reuse the KV cache of the static few-shot prefix across calls. The prefix
     # accounts for 70-85% of a prompt and is identical for the same question, so
     # caching it removes most of the prefill work (~2.9x faster per decision).
@@ -120,6 +118,8 @@ class GemmaLetterEngine:
         self._tokenizer = None
         self._letter_token_ids: dict[str, int] = {}
         self._letter_token_id_tensor = None
+        self._full_output_head = None
+        self.letter_output_head_active = False
         self._pad_token_id: int | None = None
         self.load_seconds: float | None = None
         # The LRU lock only protects map operations. Inference forks the cache's
@@ -182,6 +182,7 @@ class GemmaLetterEngine:
             self._letter_token_id_tensor = torch.tensor(
                 list(self._letter_token_ids.values()), dtype=torch.long, device=self._model.device
             )
+            self._install_letter_output_head()
             self._pad_token_id = self._tokenizer.pad_token_id
             if self._pad_token_id is None:
                 self._pad_token_id = self._tokenizer.eos_token_id
@@ -240,6 +241,47 @@ class GemmaLetterEngine:
         logger.info("letter readout uses %s A-Z tokens", name)
         return mapping
 
+    def _install_letter_output_head(self) -> None:
+        """Install a 26-row copy of the LM head when this runtime supports it.
+
+        This removes the vocabulary-sized final matrix multiplication.  The
+        replacement is deliberately conservative: any unfamiliar output module
+        leaves the model untouched and uses the GPU gather fallback instead.
+        """
+        if not self.config.restrict_output_to_letters or self._model.device.type not in {"cuda", "mps"}:
+            return
+        try:
+            import torch
+
+            get_head = getattr(self._model, "get_output_embeddings", None)
+            set_head = getattr(self._model, "set_output_embeddings", None)
+            if not callable(get_head) or not callable(set_head):
+                raise TypeError("model does not expose output-embedding accessors")
+            head = get_head()
+            weight = getattr(head, "weight", None)
+            if not isinstance(head, torch.nn.Linear) or weight is None or weight.dim() != 2:
+                raise TypeError(f"unsupported output head {type(head).__name__}")
+            if weight.shape[0] <= int(self._letter_token_id_tensor.max().item()):
+                raise ValueError("letter token id exceeds output-head vocabulary")
+            reduced = torch.nn.Linear(
+                head.in_features,
+                len(LETTERS),
+                bias=head.bias is not None,
+                device=weight.device,
+                dtype=weight.dtype,
+            )
+            with torch.no_grad():
+                reduced.weight.copy_(weight.index_select(0, self._letter_token_id_tensor))
+                if head.bias is not None:
+                    reduced.bias.copy_(head.bias.index_select(0, self._letter_token_id_tensor))
+            reduced.requires_grad_(False)
+            set_head(reduced)
+            self._full_output_head = head
+            self.letter_output_head_active = True
+            logger.info("installed 26-logit A-Z output head on %s", self._model.device.type)
+        except Exception as exc:
+            logger.warning("could not install reduced A-Z output head; using full-vocabulary fallback: %s", exc)
+
     # ----------------------------------------------------------------- inference
 
     @property
@@ -253,13 +295,17 @@ class GemmaLetterEngine:
         top_k: int | None = None,
         temperature: float | None = None,
     ) -> list[LetterReadout]:
-        """One forward pass over the batch, one full letter readout per prompt."""
-        self.load()
-        if not prompts:
-            return []
-
+        """One forward pass over the batch, materialized for legacy callers."""
         k = self.config.top_k if top_k is None else top_k
         temp = self.config.temperature if temperature is None else temperature
+        return self._materialize_readouts(self.score_batch_device(prompts), k, temp)
+
+    def score_batch_device(self, prompts: Sequence[str]):
+        """Return a device-resident ``[batch, 26]`` float32 tensor."""
+        self.load()
+        if not prompts:
+            import torch
+            return torch.empty((0, len(LETTERS)), device=self._model.device, dtype=torch.float32)
 
         # Bucketing is opt-in: on the measured MPS workload the extra
         # tokenization pass outweighed padding savings. Reassemble by index so
@@ -269,18 +315,17 @@ class GemmaLetterEngine:
             tokenized = self._tokenizer(list(prompts), add_special_tokens=True)
             lengths = [len(ids) for ids in tokenized.input_ids]
             ordered.sort(key=lambda item: lengths[item[0]])
-        results: list[LetterReadout | None] = [None] * len(prompts)
+        results = [None] * len(prompts)
         batch_size = max(1, self.config.max_batch_size)
         for start in range(0, len(ordered), batch_size):
             indexed_chunk = ordered[start : start + batch_size]
-            chunk_results = self._score_chunk([prompt for _, prompt in indexed_chunk], k, temp)
+            chunk_results = self._score_chunk_device([prompt for _, prompt in indexed_chunk])
             for (index, _), result in zip(indexed_chunk, chunk_results):
                 results[index] = result
-        return [result for result in results if result is not None]
+        import torch
+        return torch.stack([result for result in results if result is not None])
 
-    def _score_chunk(
-        self, prompts: list[str], top_k: int, temperature: float
-    ) -> list[LetterReadout]:
+    def _score_chunk_device(self, prompts: list[str]):
         import torch
 
         assert self._tokenizer is not None and self._model is not None
@@ -300,38 +345,34 @@ class GemmaLetterEngine:
                 use_cache=False,
             )
 
-        next_token_logits = outputs.logits[:, -1, :].float()
-        letter_values = gather_letter_logits(next_token_logits, self._letter_token_id_tensor)
-        letter_logits = batch_letter_logits(letter_values)
-        masses = (
-            batch_letter_mass(next_token_logits, letter_values)
-            if self.config.report_letter_mass
-            else [None] * len(letter_logits)
-        )
-        return [
-            LetterReadout(
-                logits=row,
-                top=distribution_from_letter_logits(row, top_k=top_k, temperature=temperature),
-                letter_mass=mass,
-            )
-            for row, mass in zip(letter_logits, masses)
-        ]
+        return self._letter_values_from_model_logits(outputs.logits[:, -1, :])
 
     def score_one(
         self, prompt: str, *, top_k: int | None = None, temperature: float | None = None
     ) -> LetterReadout:
         return self.score_batch([prompt], top_k=top_k, temperature=temperature)[0]
 
-    def _letter_readout_values(self, next_token_logits):
-        """Gather the A-Z slice once and optionally calculate mass from it."""
-        letter_values = gather_letter_logits(next_token_logits, self._letter_token_id_tensor)
-        logits = batch_letter_logits(letter_values)
-        mass = (
-            batch_letter_mass(next_token_logits, letter_values)
-            if self.config.report_letter_mass
-            else [None] * len(logits)
-        )
-        return logits, mass
+    def _letter_values_from_model_logits(self, model_logits):
+        """Return A-Z logits in float32 without leaving the active device."""
+        if model_logits.dim() != 2:
+            raise RuntimeError("expected model logits of shape [batch, vocab-or-26]")
+        values = model_logits.float()
+        if values.shape[1] == len(LETTERS):
+            return values
+        return gather_letter_logits(values, self._letter_token_id_tensor).float()
+
+    def _materialize_readouts(self, values, top_k: int, temperature: float) -> list[LetterReadout]:
+        """Move small A-Z rows to Python only for the legacy/debug surface."""
+        logits = batch_letter_logits(values)
+        return [
+            LetterReadout(
+                logits=row,
+                top=distribution_from_letter_logits(row, top_k=top_k, temperature=temperature),
+                # A 26-row head cannot measure full-vocabulary probability mass.
+                letter_mass=None,
+            )
+            for row in logits
+        ]
 
     # ------------------------------------------------------------ prefix caching
 
@@ -375,36 +416,32 @@ class GemmaLetterEngine:
         cached prefix tokens (a BPE merge across the boundary, say), that prompt
         silently falls back to a full forward pass.
         """
-        self.load()
-        if not suffixes:
-            return []
-
         k = self.config.top_k if top_k is None else top_k
         temp = self.config.temperature if temperature is None else temperature
+        return self._materialize_readouts(self.score_with_prefix_device(prefix, suffixes), k, temp)
+
+    def score_with_prefix_device(self, prefix: str, suffixes: Sequence[str]):
+        """Cached-prefix equivalent of :meth:`score_batch_device`."""
+        self.load()
+        if not suffixes:
+            import torch
+            return torch.empty((0, len(LETTERS)), device=self._model.device, dtype=torch.float32)
 
         if not self.config.prefix_cache or not prefix:
-            return self.score_batch(
-                [prefix + s for s in suffixes], top_k=top_k, temperature=temperature
-            )
+            return self.score_batch_device([prefix + s for s in suffixes])
 
-        results: list[LetterReadout] = []
-        for suffix, scored in zip(suffixes, self._letter_logits_cached_many(prefix, suffixes)):
+        results = []
+        for suffix, scored in zip(suffixes, self._letter_values_cached_many(prefix, suffixes)):
             if scored is None:
-                results.append(self.score_batch([prefix + suffix], top_k=k, temperature=temp)[0])
+                results.append(self.score_batch_device([prefix + suffix])[0])
             else:
-                logits, mass = scored
-                results.append(
-                    LetterReadout(
-                        logits=logits,
-                        top=distribution_from_letter_logits(logits, top_k=k, temperature=temp),
-                        letter_mass=mass,
-                    )
-                )
-        return results
+                results.append(scored)
+        import torch
+        return torch.stack(results)
 
-    def _letter_logits_cached_many(
+    def _letter_values_cached_many(
         self, prefix: str, suffixes: Sequence[str]
-    ) -> list[tuple[dict[str, float], float | None] | None]:
+    ) -> list[object | None]:
         """Score compatible cached tails in batches grouped by token length.
 
         A cache miss seeds the prefix from one full prompt (preserving the
@@ -417,10 +454,10 @@ class GemmaLetterEngine:
             entry = self._prefix_caches.get(prefix)
 
         if entry is None:
-            first = self._letter_logits_cached(prefix, suffixes[0])
+            first = self._letter_values_cached(prefix, suffixes[0])
             if len(suffixes) == 1:
                 return [first]
-            rest = self._letter_logits_cached_many(prefix, suffixes[1:])
+            rest = self._letter_values_cached_many(prefix, suffixes[1:])
             return [first, *rest]
 
         device = self._model.device
@@ -430,7 +467,7 @@ class GemmaLetterEngine:
         ]
         prefix_len = entry.prefix_ids.shape[1]
         grouped: dict[int, list[tuple[int, object]]] = {}
-        results: list[tuple[dict[str, float], float | None] | None] = [None] * len(suffixes)
+        results: list[object | None] = [None] * len(suffixes)
         for index, full_ids in enumerate(encoded):
             total = full_ids.shape[1]
             if total <= prefix_len or not torch.equal(full_ids[:, :prefix_len], entry.prefix_ids):
@@ -461,14 +498,14 @@ class GemmaLetterEngine:
                         logits_to_keep=MAX_NEW_TOKENS,
                         use_cache=False,
                     )
-            logits, masses = self._letter_readout_values(out.logits[:, -1, :].float())
-            for (index, _), row, mass in zip(group, logits, masses):
-                results[index] = row, mass
+            values = self._letter_values_from_model_logits(out.logits[:, -1, :])
+            for (index, _), row in zip(group, values):
+                results[index] = row
         return results
 
-    def _letter_logits_cached(
+    def _letter_values_cached(
         self, prefix: str, suffix: str
-    ) -> tuple[dict[str, float], float] | None:
+    ) -> object | None:
         """Letter logits for ``prefix + suffix``, reusing or populating the prefix cache.
 
         A miss costs one forward pass over the whole prompt, matching the uncached
@@ -515,9 +552,7 @@ class GemmaLetterEngine:
                         logits_to_keep=MAX_NEW_TOKENS,
                         use_cache=False,
                     )
-                next_token_logits = out.logits[:, -1, :].float()
-            logits, masses = self._letter_readout_values(next_token_logits)
-            return logits[0], masses[0]
+            return self._letter_values_from_model_logits(out.logits[:, -1, :])[0]
 
         # Miss: one full forward, then keep the prefix slice of its KV cache.
         prefix_ids = self._tokenizer(
@@ -532,7 +567,6 @@ class GemmaLetterEngine:
                 logits_to_keep=MAX_NEW_TOKENS,
                 use_cache=True,
             )
-        next_token_logits = out.logits[:, -1, :].float()
 
         if total > prefix_len and torch.equal(full_ids[:, :prefix_len], prefix_ids):
             cache = out.past_key_values
@@ -543,5 +577,4 @@ class GemmaLetterEngine:
                     self._prefix_caches.popitem(last=False)
                     self.prefix_cache_evictions += 1
 
-        logits, masses = self._letter_readout_values(next_token_logits)
-        return logits[0], masses[0]
+        return self._letter_values_from_model_logits(out.logits[:, -1, :])[0]

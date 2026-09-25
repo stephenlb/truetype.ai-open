@@ -70,7 +70,7 @@ Profiling the warm path (Text `prefix=552 tok, tail=51 tok`):
 |---|---|
 | tokenize full prompt | 1.5ms |
 | **forward (cached prefix + tail)** | **166ms** |
-| full-vocab logits `.float()` | 0.06ms |
+| full-vocab logits `.float()` | 0.06ms (legacy fallback only) |
 | letter slice (26 ids) + mass | 4.9ms |
 | `cache.crop` | 0.09ms |
 

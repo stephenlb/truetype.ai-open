@@ -17,6 +17,7 @@ from src.truetype.questions import (
     build_question,
     confidence_from_probabilities,
     score_question,
+    score_question_tensor,
 )
 from src.truetype.render import _interleaved_order, render_example_prefix, render_question, render_target_block
 
@@ -134,6 +135,40 @@ def test_score_question_returns_typed_answers(spec, logits, expected_type, expec
     else:
         assert answer.score == pytest.approx(expected_value, abs=1e-6)
         assert math.isclose(sum(answer.probabilities.values()), 1.0)
+
+
+@pytest.mark.parametrize(
+    ("spec", "values"),
+    [
+        ({"type": "noul", "instructions": "Does it work?"}, {"Y": 2.0, "N": 0.0}),
+        ({"type": "choice", "instructions": "Pick", "criteria": {"a": "first", "b": "second"}}, {"A": 0.0, "B": 3.0}),
+        ({"type": "score", "instructions": "Rate", "criteria": ["low", "middle", "high"]}, {"A": 0.0, "B": 0.0, "C": 10.0}),
+    ],
+)
+def test_tensor_question_scoring_matches_dict_scoring(spec, values):
+    torch = pytest.importorskip("torch")
+    question = build_question("q", spec)
+    full = {letter: -100.0 for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+    full.update(values)
+    tensor = torch.tensor([full[letter] for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"])
+    actual = score_question_tensor(question, tensor)
+    expected = score_question(question, full)
+    assert actual.type == expected.type
+    assert actual.choice == expected.choice
+    if expected.noul is None:
+        assert actual.noul is None
+    else:
+        assert actual.noul == pytest.approx(expected.noul)
+    if expected.score is None:
+        assert actual.score is None
+    else:
+        assert actual.score == pytest.approx(expected.score)
+    if expected.confidence is None:
+        assert actual.confidence is None
+    else:
+        assert actual.confidence == pytest.approx(expected.confidence)
+    assert actual.legend == expected.legend
+    assert actual.probabilities == pytest.approx(expected.probabilities)
 
 
 # 3 tests

@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .letters import LETTERS
+from .letters import LETTER_INDEX, LETTERS
 
 # Fixed bank of question-agnostic demonstrations. Their predicates differ from the
 # target question on purpose: they teach the letter-slot format, not the task.
@@ -221,4 +221,58 @@ def score_question(question: Question, letter_logits: dict[str, float], temperat
         probabilities={str(i): p for i, p in enumerate(probs)},
         legend={str(i): option.description or "" for i, option in enumerate(question.options)},
         confidence=confidence_from_probabilities(probs),
+    )
+
+
+def score_question_tensor(question: Question, letter_logits, temperature: float = 1.0) -> QuestionAnswer:
+    """Score a ``[26]`` device tensor, transferring only final answer values.
+
+    The logits, legal-option gather, softmax, entropy, ranking, and score
+    reduction all remain on the tensor's device.  Constructing ``QuestionAnswer``
+    necessarily creates Python/JSON values at the API boundary.
+    """
+    if temperature <= 0:
+        raise ValueError("temperature must be > 0")
+    if letter_logits.dim() != 1 or letter_logits.shape[0] != len(LETTERS):
+        raise ValueError("expected one [26] letter-logit tensor")
+
+    import torch
+
+    indices = torch.tensor(
+        [LETTER_INDEX[option.letter] for option in question.options],
+        device=letter_logits.device,
+        dtype=torch.long,
+    )
+    probs = torch.softmax(letter_logits.index_select(0, indices).float() / temperature, dim=0)
+
+    if question.type == "noul":
+        return QuestionAnswer(type="noul", noul=float(probs[0].item()))
+
+    if len(question.options) <= 1:
+        confidence_value = 1.0
+    else:
+        entropy = -(probs * torch.where(probs > 0, probs.log(), torch.zeros_like(probs))).sum()
+        confidence = 1.0 - entropy / torch.log(torch.tensor(float(len(question.options)), device=probs.device))
+        confidence_value = float(torch.clamp(confidence, min=0.0).item())
+
+    if question.type == "choice":
+        # Stable GPU argsort preserves the request's option order for exact ties.
+        order = torch.argsort(probs, descending=True, stable=True).tolist()
+        probability_values = probs.tolist()
+        return QuestionAnswer(
+            type="choice",
+            choice=question.options[order[0]].label,
+            probabilities={question.options[index].label: probability_values[index] for index in order},
+            confidence=confidence_value,
+        )
+
+    probability_values = probs.tolist()
+    levels = torch.arange(len(question.options), device=probs.device, dtype=probs.dtype)
+    score = float((levels * probs).sum().item())
+    return QuestionAnswer(
+        type="score",
+        score=score,
+        probabilities={str(index): value for index, value in enumerate(probability_values)},
+        legend={str(index): option.description or "" for index, option in enumerate(question.options)},
+        confidence=confidence_value,
     )

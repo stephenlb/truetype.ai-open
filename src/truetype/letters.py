@@ -28,11 +28,9 @@ class LetterReadout:
 
     ``logits`` keeps every letter when a question has more options than ``top_k``.
     ``top`` is the reported top-k softmax distribution.
-    ``letter_mass`` is how much of the model's *full-vocabulary* probability landed
-    on the 26 letters we scored. This checks whether the prompt puts the
-    model in a "next token is a letter" state. If it approaches zero, the
-    readout is measuring noise in the tail of the distribution, even though an
-    argmax over it may still look plausible.
+    ``letter_mass`` is retained as a nullable compatibility field. The optimized
+    26-row output head intentionally cannot report it because it never computes
+    a full-vocabulary distribution.
     """
 
     logits: dict[str, float]
@@ -150,25 +148,3 @@ def batch_letter_logits(
         {letter: float(value) for letter, value in zip(letters, row)}
         for row in gathered_logits
     ]
-
-
-def batch_letter_mass(
-    next_token_logits,  # torch.Tensor [batch, vocab]
-    gathered_logits,  # torch.Tensor [batch, 26], or legacy letter-id mapping
-) -> list[float]:
-    """Fraction of full-vocabulary probability sitting on the A-Z tokens, per row.
-
-    Uses log-sum-exp over the vocabulary to avoid overflow and replace a full
-    softmax with one reduction.
-    """
-    import torch
-
-    if next_token_logits.dim() != 2:
-        raise LetterLogitError("expected next-token logits of shape [batch, vocab]")
-
-    if isinstance(gathered_logits, dict):
-        gathered_logits = gather_letter_logits(next_token_logits, gathered_logits)
-
-    total = torch.logsumexp(next_token_logits, dim=-1)
-    letters = torch.logsumexp(gathered_logits, dim=-1)
-    return [float(value) for value in torch.exp(letters - total)]

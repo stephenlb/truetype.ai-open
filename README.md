@@ -6,13 +6,15 @@ returns the original formats for all three supported question types.
 
 ![Jev Replica System One Model](media/jev-replica-system-one-model.jpg)
 
-Each answer uses one token. The engine runs one `forward()` pass, reads
-next-token logits at the answer position, keeps the 26 A-Z token IDs, and
-applies a temperature-0.7 softmax to the letters allowed by the question. At
-load time, it assigns one token variant to each letter and checks that all 26
-are distinct. The code in `src/` does not call `generate()`, sample tokens, or
-run a decode loop. See `demo/README.md` for measurements and implementation
-notes.
+Each answer uses one token. On CUDA and MPS, the engine replaces Gemma's
+vocabulary output projection with its 26 validated A-Z rows, so the forward
+pass emits only letter logits. It applies the temperature-0.7 softmax over the
+letters allowed by the question on the accelerator, then transfers only final
+answer values for JSON serialization. Unsupported model-head implementations
+fall back safely to a full-vocabulary GPU gather. The code in `src/` does not
+call `generate()`, sample tokens, or run a decode loop. Set
+`TYPESAFE_REPLICA_RESTRICT_OUTPUT_TO_LETTERS=0` to retain the full head for
+parity diagnostics.
 
 https://github.com/user-attachments/assets/c24ad3fd-044c-46b9-8862-46b70dd8e201
 
@@ -134,6 +136,10 @@ probability of "yes."
 ```bash
 python -m pytest
 ```
+
+To require Apple GPU execution for the live-model tests, run
+`TRUETYPE_TEST_DEVICE=mps python -m pytest`. This fails immediately if PyTorch
+cannot access MPS and checks that the loaded model is on the MPS device.
 
 The suite has 102 tests: 50 fast deterministic contracts plus 50 functional
 cases against the live model (20 `noul`, 20 `choice`, and 10 `score`) and two

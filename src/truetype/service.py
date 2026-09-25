@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from .engine import DEFAULT_TEMPERATURE, EngineConfig, GemmaLetterEngine
 from .letters import LetterReadout
-from .questions import Question, QuestionAnswer, build_question, score_question
+from .questions import Question, QuestionAnswer, build_question, score_question, score_question_tensor
 from .render import render_batch, render_example_prefix, render_target_block
 
 SUPPORTED_MODELS = {
@@ -85,6 +85,28 @@ class TypeSafeReplica:
             )
         return readouts, prompts
 
+    def _score_question_values(
+        self,
+        questions: list[Question],
+        state: str,
+    ) -> tuple[list[object], dict[str, str]]:
+        """Return device A-Z rows for the optimized engine path."""
+        rendered = render_batch(questions, state)
+        prompts = {item.question_id: item.text for item in rendered}
+        if not self.engine.config.prefix_cache:
+            values = self.engine.score_batch_device(list(prompts.values()))
+            return list(values), prompts
+
+        self.engine.ensure_prefix_capacity(len(questions))
+        values = []
+        for question in questions:
+            values.append(
+                self.engine.score_with_prefix_device(
+                    render_example_prefix(question), [render_target_block(question, state)]
+                )[0]
+            )
+        return values, prompts
+
     def system_one(
         self,
         *,
@@ -102,21 +124,29 @@ class TypeSafeReplica:
             build_question(qid, spec) for qid, spec in questions.items()
         ]
 
-        distributions, prompts = self._score_questions(
-            parsed, state_text, temperature=temperature
+        tensor_path = callable(getattr(self.engine, "score_batch_device", None)) and callable(
+            getattr(self.engine, "score_with_prefix_device", None)
         )
+        if tensor_path:
+            distributions, prompts = self._score_question_values(parsed, state_text)
+        else:
+            distributions, prompts = self._score_questions(parsed, state_text, temperature=temperature)
 
         answers: dict[str, dict] = {}
         debug: dict[str, dict] = {}
         for question, readout in zip(parsed, distributions):
-            # Score over the *full* 26-letter readout so a question with more options
-            # than top_k is never truncated; score_question renormalizes over the
-            # question's own legal letters.
-            answer: QuestionAnswer = score_question(
-                question, readout.logits, temperature=temperature
-            )
+            if tensor_path:
+                answer = score_question_tensor(question, readout, temperature=temperature)
+            else:
+                # Score over the full 26-letter readout so a question with more
+                # options than top_k is never truncated.
+                answer = score_question(question, readout.logits, temperature=temperature)
             answers[question.id] = answer.to_dict()
             if include_debug:
+                if tensor_path:
+                    readout = self.engine._materialize_readouts(
+                        readout.unsqueeze(0), self.engine.config.top_k, temperature
+                    )[0]
                 debug[question.id] = {
                     "prompt": prompts[question.id],
                     "letter_logits": readout.logits,

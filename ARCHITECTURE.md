@@ -103,23 +103,18 @@ cover every distinct prefix in a request, clamped to a hard cap.
 
 ## Output processing
 
-The model emits `logits[batch, vocab]` for a single position. Turning that into
-an answer is three steps.
+On CUDA/MPS, the model's output projection is replaced at load time with the
+validated 26 A-Z rows. It therefore emits `logits[batch, 26]` for a single
+position. If the installed model does not expose a compatible linear output
+head, the engine safely falls back to full-vocabulary logits plus an on-device
+gather.
 
 ### 1. Gather the letters (`letters.py`)
 
 `batch_letter_logits()` indexes the 26 `A-Z` token ids out of the vocab row into
 one logit dict per prompt. This is the raw vote, before any renormalization.
 
-### 2. Sanity-check the mass
-
-`batch_letter_mass()` reports what fraction of the *full-vocabulary*
-probability sits on `A-Z`, computed as
-`exp(logsumexp(letters) − logsumexp(vocab))`. A healthy prompt puts nearly all
-its mass there; a value near zero means the argmax is noise from the
-distribution's tail and the prompt is malformed.
-
-### 3. Renormalize over legal letters
+### 2. Renormalize over legal letters
 
 Scoring receives the **full 26-letter dict**, never a truncated top-k, so a
 question with more options than `top_k` is not cut off. Softmax runs at
@@ -137,9 +132,10 @@ Then each type reads the distribution its own way:
 | `score` | expected level `Σ i·pᵢ` over ordered criteria | `1 − H / log n` |
 
 A `LetterLogitError` is raised on non-letter keys, an empty readout, or a
-non-finite softmax denominator.
+non-finite softmax denominator. The former full-vocabulary `letter_mass`
+telemetry is unavailable in 26-logit mode.
 
-### 4. Response envelope
+### 3. Response envelope
 
 ```
 { model, answers, usage }

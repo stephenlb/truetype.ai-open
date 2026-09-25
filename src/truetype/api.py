@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
         device=os.environ.get("TYPESAFE_REPLICA_DEVICE", "auto"),
         dtype=os.environ.get("TYPESAFE_REPLICA_DTYPE", "auto"),
         top_k=int(os.environ.get("TYPESAFE_REPLICA_TOP_K", "5")),
+        restrict_output_to_letters=os.environ.get("TYPESAFE_REPLICA_RESTRICT_OUTPUT_TO_LETTERS", "1")
+        not in {"0", "false", "False"},
         # Prefix KV caching makes repeat questions ~5x faster. The first request for
         # a given question shape pays a normal (uncached) forward pass to populate it.
         prefix_cache=os.environ.get("TYPESAFE_REPLICA_PREFIX_CACHE", "1") not in {"0", "false", "False"},
@@ -95,6 +97,10 @@ def health() -> dict:
     return {
         "status": "ok",
         "model_loaded": engine.is_loaded,
+        "letter_output_head": {
+            "active": engine.letter_output_head_active,
+            "restricted": engine.config.restrict_output_to_letters,
+        },
         "prefix_cache": {
             "enabled": engine.config.prefix_cache,
             "hits": engine.prefix_cache_hits,
